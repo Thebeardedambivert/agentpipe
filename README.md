@@ -125,7 +125,7 @@ what the cache suppressed. Caching success is safe. Caching failure is a trap.
 ## Credit
 
 The architecture is not original to me. Rules 1 and 2 above come from a design by
-Andrew Olisaemeka, who also measured the 70,000-to-100 ratio that started this.
+Andrew Onwe (@DrewCodesIt), who also measured the 70,000-to-100 ratio that started this.
 The harness split in Layer 5 is his.
 
 Mine: the layering, the build order, Layer 0, and the argument that measurement
@@ -134,3 +134,4 @@ comes before any of it.
 ## License
 
 MIT
+

@@ -4,7 +4,7 @@
 
 The architecture here is not original to me. The two ideas it rests on, that the
 workflow owns the loop and that context is rebuilt from real state rather than
-accumulated, come from a design written by Andrew Olisaemeka, who measured the
+accumulated, come from a design written by Andrew Onwe (@DrewCodesIt), who measured the
 70,000-to-100 ratio that started all of this. The harness split in Layer 5 is his
 too. What is mine: the layering, the build order, the telemetry in Layer 0, and
 the argument that measurement should come before any of it.
@@ -299,3 +299,4 @@ serving, because the two produce different systems.
 Layer 1 cannot be written until we know what codebase this operates on. The
 validation commands are part of the ticket contract, and validation commands are
 specific to a repo. That answer unblocks everything after Layer 0.
+
