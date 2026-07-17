@@ -10,8 +10,8 @@ pytest -q
 ```
 
 ## Acceptance
-- [ ] prices.example.json exists at the repo root
-- [ ] It contains null price values, not real numbers
+- [ ] prices.example.json exists at the repo root `check: python -c "import os, sys; sys.exit(0 if os.path.exists('prices.example.json') else 1)"`
+- [ ] It contains null price values, not real numbers `check: python -c "import json, sys; d = json.load(open('prices.example.json')); vals = [v for m in d.values() if isinstance(m, dict) for v in m.values()]; sys.exit(0 if vals and all(x is None for x in vals) else 1)"`
 - [ ] It explains that the reader must fill it in themselves
 - [ ] No existing files are changed
 

@@ -13,6 +13,7 @@ import argparse
 import sys
 
 from agentpipe.builder import report, run_builder
+from agentpipe.checks import Verdict, assess
 from agentpipe.patch import PatchError
 from agentpipe.repo import Repo, RepoError
 from agentpipe.telemetry import MeteredClient, PostgresCallStore, PriceMap
@@ -44,6 +45,30 @@ def main() -> int:
     except RepoError as exc:
         print(f"repo error: {exc}")
         return 1
+
+    # The cheapest question, asked before the expensive one: is this already
+    # done? A ticket whose acceptance checks all pass is stale, and the failure
+    # this gate exists to refuse is paying a model to rewrite a correct file.
+    # No model, no database, just the checks the ticket declared.
+    decision = assess(ticket, repo.root)
+    if decision.verdict is Verdict.BROKEN:
+        print(f"\n{decision.reason}\n")
+        for r in decision.results:
+            if r.outcome.name == "ERROR":
+                print(f"  broken check: {r.command}")
+                print(f"    exit {r.exit_code}: {r.output}")
+        print("\nFix the check. This cost nothing.")
+        return 1
+    if decision.verdict is Verdict.SATISFIED:
+        print(f"\n{decision.reason}:")
+        for r in decision.results:
+            print(f"  ok: {r.command}")
+        print("\nNothing to do. This cost nothing.")
+        return 0
+    if not ticket.checks:
+        # Say the gate was skipped, out loud. A staleness check that silently
+        # does nothing is the same trap as a test that silently skips.
+        print("note: this ticket has no acceptance checks, so staleness is unguarded.")
 
     client = MeteredClient(store=PostgresCallStore(), prices=PriceMap.from_env())
 

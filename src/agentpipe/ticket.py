@@ -26,13 +26,23 @@ Format (markdown, sections by ## heading):
 
     ## Acceptance
     - [ ] Something a human can check
-    - [ ] Something else
+    - [ ] Something a machine can check `check: python -c "..."`
 
     ## Constraints
     - Optional. Things the agent must not do.
 
     ## Files
     - Optional. Hints about where to look.
+
+An acceptance bullet may carry an inline `check:` command. Its exit code is read
+before any model is called: 0 means the work is already present, 1 means it is
+not, anything else means the check itself is broken. A ticket whose checks all
+pass is already done, so the pipeline says so and stops, for free, rather than
+paying to rewrite a correct file. Checks are optional and live on the bullet they
+verify, on purpose: a check floating in its own section drifts from the criterion
+it was meant to prove, and two specs of "done" that disagree is the exact bug
+this project keeps paying for. See checks.py for the exit-code contract and the
+trust boundary these commands run under.
 """
 
 from __future__ import annotations
@@ -59,6 +69,19 @@ class TicketError(Exception):
 
 
 @dataclass(frozen=True)
+class Criterion:
+    """One acceptance criterion, and optionally how a machine checks it.
+
+    `text` is for the human and for the model. `check` is a command whose exit
+    code says whether this criterion already holds. It lives on the criterion,
+    not in a separate list, so the two cannot drift apart.
+    """
+
+    text: str
+    check: str | None = None
+
+
+@dataclass(frozen=True)
 class Ticket:
     """A contract the pipeline can act on.
 
@@ -70,9 +93,19 @@ class Ticket:
     ref: str
     goal: str
     validation: tuple[str, ...]
-    acceptance: tuple[str, ...]
+    acceptance: tuple[Criterion, ...]
     constraints: tuple[str, ...] = ()
     files_hint: tuple[str, ...] = ()
+
+    @property
+    def checks(self) -> tuple[str, ...]:
+        """The check commands, for the criteria that carry one.
+
+        A ticket with no checks returns an empty tuple, which the staleness gate
+        reads as "unguarded", never as "already done". Absence of a check is not
+        evidence the work exists.
+        """
+        return tuple(c.check for c in self.acceptance if c.check)
 
     @classmethod
     def from_file(cls, path: str | Path) -> Ticket:
@@ -106,7 +139,7 @@ class Ticket:
                 "that it worked is the only evidence, and that is not evidence."
             )
 
-        acceptance = _bullets(sections.get("acceptance", ""))
+        acceptance = _criteria(sections.get("acceptance", ""))
         if not acceptance:
             problems.append(
                 "no '## Acceptance' criteria. Without these, 'done' means "
@@ -164,4 +197,28 @@ def _bullets(block: str) -> tuple[str, ...]:
         m = re.match(r"^[-*]\s*(?:\[[ xX]\]\s*)?(.+)$", line)
         if m and m.group(1).strip():
             out.append(m.group(1).strip())
+    return tuple(out)
+
+
+def _criteria(block: str) -> tuple[Criterion, ...]:
+    """Acceptance bullets, each with an optional trailing `check: ...` command.
+
+    The check is pulled off the end of the bullet and stored on the same
+    Criterion as the text it verifies. Everything before the check is the human
+    text. A bullet with no check is a criterion a human reads and a machine
+    cannot yet judge, which is fine: not every criterion reduces to an exit code.
+    """
+    out = []
+    for line in block.splitlines():
+        m = re.match(r"^[-*]\s*(?:\[[ xX]\]\s*)?(.+)$", line.strip())
+        if not (m and m.group(1).strip()):
+            continue
+        body = m.group(1).strip()
+        check = None
+        cm = re.search(r"`check:\s*(.+?)`\s*$", body)
+        if cm:
+            check = cm.group(1).strip()
+            body = body[: cm.start()].strip()
+        if body:
+            out.append(Criterion(text=body, check=check))
     return tuple(out)

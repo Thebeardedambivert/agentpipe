@@ -47,22 +47,39 @@ have. Was not the fix it was sold as.
 ## Next, in order
 
 **1. A ticket that is not already done.**
-`tickets/TASK-1.md` asks for `prices.example.json`, which exists and is correct.
-The pipeline rewrites it anyway, 20 lines to 20 lines. Do not `--apply` it.
-Write something real: the tracing gap below is the obvious candidate. (The CI
-workflow once suggested here now exists, built by hand as
-`.github/workflows/ci.yml`, not through the pipeline. The pipeline still has no
-real ticket of its own.)
+`tickets/TASK-1.md` now carries acceptance checks, so running it stops for free
+at the staleness gate instead of rewriting a correct file (see item 2). It is no
+longer a good demo of the pipeline doing work, because it correctly does none.
+The pipeline still has no real ticket of its own. Write something real: the
+tracing gap below is the obvious candidate. (The CI workflow once suggested here
+exists, built by hand as `.github/workflows/ci.yml`, not through the pipeline.)
 
-**2. The stale ticket hole.**
-Nothing in the pipeline asks "is this already true?". The agent always does
-something, because it was given something to do. Validation cannot catch it:
-`pytest -q` passes whether or not the work was needed. This is a design gap, not
-a bug, and it is more interesting than anything fixed so far.
+**2. The stale ticket hole. (Partially closed.)**
+Nothing used to ask "is this already true?", so the agent always did something.
+Now `checks.py` runs a ticket's acceptance checks before any model call: a ticket
+whose checks all pass is stale and the run stops, having spent nothing. An
+acceptance bullet carries its own check inline, so the two cannot drift. The gate
+has three states, not two: pass, not-done, and broken, because a check that
+cannot run is a different fact from work that is not done, and conflating them is
+this project's signature bug.
+
+Still open, and deliberately so:
+- Unguarded by default. A ticket with no checks still proceeds; the gate says so
+  out loud rather than pretending. Optional was chosen because we have no data yet
+  on what fraction of real tickets can express a checkable acceptance.
+- Structural only. "Does the file read well?" is semantic and waits for Layer 6's
+  judge. A weak check that passes for the wrong reason is worse than none.
+- A Windows shell seam: a command that does not exist exits 1 (same as not-done)
+  on cmd.exe but 127 (-> broken) on POSIX. Caught in CI, missed locally. It never
+  reads as "done", so the failure is safe, but it is real. Documented in checks.py.
+- Trust boundary: checks run with your privileges. Fine while you author your own
+  tickets, needs a sandbox the day they come from anywhere you do not control.
 
 **3. Layer 3, the loop.**
 Where LangGraph finally earns its place, where the cache claim gets tested, and
-where A1.5's idempotency tension springs for real. See PLAN.md.
+where A1.5's idempotency tension springs for real. `checks.py` is the seed of its
+validation runner: the same check run before is the staleness gate, run after is
+the success check. See PLAN.md.
 
 ## Decisions already made, so nobody relitigates them
 

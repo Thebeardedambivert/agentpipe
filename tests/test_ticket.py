@@ -45,7 +45,24 @@ def test_parses_a_good_ticket():
 
 def test_checkbox_and_dash_bullets_both_work():
     t = Ticket.parse(GOOD)
-    assert t.acceptance[0] == "prices.example.json exists at the repo root"
+    assert t.acceptance[0].text == "prices.example.json exists at the repo root"
+    assert t.acceptance[0].check is None
+
+
+def test_inline_check_is_parsed_and_split_from_text():
+    text = GOOD.replace(
+        "- [ ] prices.example.json exists at the repo root",
+        '- [ ] prices.example.json exists at the repo root '
+        '`check: python -c "import sys; sys.exit(0)"`',
+    )
+    t = Ticket.parse(text)
+    # The check comes off the end; the human text is what remains.
+    assert t.acceptance[0].text == "prices.example.json exists at the repo root"
+    assert t.acceptance[0].check == 'python -c "import sys; sys.exit(0)"'
+    # The other bullet has no check, and that is allowed.
+    assert t.acceptance[1].check is None
+    # The convenience view the gate uses: only the criteria that carry a check.
+    assert t.checks == ('python -c "import sys; sys.exit(0)"',)
 
 
 def test_multiple_validation_commands():
