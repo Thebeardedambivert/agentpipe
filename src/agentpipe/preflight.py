@@ -83,6 +83,8 @@ def check_store_writable() -> str:
 
     from agentpipe.telemetry import CallRecord
 
+    import psycopg
+
     store = PostgresCallStore()
     key = f"preflight-{uuid.uuid4()}"
     probe = CallRecord(
@@ -99,13 +101,27 @@ def check_store_writable() -> str:
         task_ref="PREFLIGHT",
         error="preflight write probe, safe to ignore",
     )
-    store.record(probe)
-    if store.find(key) is None:
-        raise RuntimeError(
-            "wrote a row and could not read it back. Check that schema.sql "
-            "has been applied to this database."
-        )
-    return "insert confirmed"
+    try:
+        store.record(probe)
+        if store.find(key) is None:
+            raise RuntimeError(
+                "wrote a row and could not read it back. Check that schema.sql "
+                "has been applied to this database."
+            )
+    finally:
+        # Clean up whether the check passed or not. Every preflight run used to
+        # leave a row behind forever, and those rows are in the same table the
+        # project uses to measure itself. A diagnostic that dirties the data it
+        # diagnoses is not a diagnostic.
+        try:
+            with psycopg.connect(os.environ["AGENTPIPE_DSN"]) as conn:
+                conn.execute(
+                    "delete from model_calls where idempotency_key = %s", (key,)
+                )
+        except Exception:  # noqa: BLE001
+            pass
+
+    return "insert confirmed, probe removed"
 
 
 def smoke(model: str) -> None:

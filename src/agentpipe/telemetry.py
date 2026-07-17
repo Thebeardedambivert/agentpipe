@@ -98,17 +98,47 @@ class Usage:
     input_tokens: int = 0
     output_tokens: int = 0
     cached_input_tokens: int = 0
+    reasoning_tokens: int = 0
 
     @property
     def total_tokens(self) -> int:
         return self.input_tokens + self.output_tokens
 
     @property
+    def answer_tokens(self) -> int:
+        """Output that was actually the reply.
+
+        Reasoning tokens are billed as output but are not part of the answer.
+        A response can be 400 output tokens and 0 answer tokens: the model
+        thought hard and said nothing. That is indistinguishable from "the model
+        had nothing to say" unless the two are counted separately, which is why
+        this field exists.
+        """
+        return max(0, self.output_tokens - self.reasoning_tokens)
+
+    @property
     def ratio(self) -> float:
-        """Input per unit of output. Andrew's 70k/100 is a ratio of 700."""
+        """Input per unit of output. Andrew's 70k/100 is a ratio of 700.
+
+        Billed view. Uses output_tokens, so reasoning counts.
+        """
         if self.output_tokens == 0:
             return float("inf")
         return self.input_tokens / self.output_tokens
+
+    @property
+    def answer_ratio(self) -> float:
+        """Input per unit of actual answer.
+
+        Read this next to ratio, because reasoning creates a perverse gap
+        between them. Turn reasoning effort up and ratio improves while the bill
+        grows: 1,500 in and 400 out reads as a healthy 3.8, even when 396 of
+        those tokens were thinking and the reply was four words. answer_ratio
+        says 375 and is telling the truth.
+        """
+        if self.answer_tokens == 0:
+            return float("inf")
+        return self.input_tokens / self.answer_tokens
 
     @property
     def cache_hit_rate(self) -> float:
@@ -132,9 +162,37 @@ class CallRecord:
     task_ref: str | None = None
     pack_hash: str | None = None
     error: str | None = None
+    finish_reason: str | None = None
     trace_id: str | None = None
     span_id: str | None = None
     content: str = ""
+
+    def __post_init__(self) -> None:
+        """Refuse to exist in a state that lies.
+
+        This is the cheap version of a lesson that cost an afternoon. A record
+        marked 'ok' with no content was constructible, so it got constructed,
+        stored, read back, and replayed. Four places could each have caught it.
+        None did, because none of them was *the* place.
+
+        Checking at every use site is how you end up with a codebase made of
+        paranoia and still miss the fifth site. Checking at construction is one
+        place, and it catches every path in and out, including ones nobody has
+        written yet.
+
+        The general shape: an invalid state you can build is an invalid state
+        you will build. Prefer making it unrepresentable to guarding against it.
+        """
+        if self.status == "ok" and not self.content and not self.error:
+            raise ValueError(
+                "a successful call with no content is not a successful call. "
+                "Either the reply was genuinely empty, in which case say so "
+                "with status='error', or something dropped it on the way in."
+            )
+        if self.status == "error" and not self.error:
+            raise ValueError("status='error' with no error message says nothing")
+        if self.cost_usd < 0:
+            raise ValueError(f"negative cost: {self.cost_usd}")
 
 
 # ---------------------------------------------------------------------------
@@ -143,9 +201,27 @@ class CallRecord:
 # ---------------------------------------------------------------------------
 
 class CallStore(ABC):
+    """The contract every store must honour.
+
+    Stated explicitly because the first version left it implicit, and the two
+    implementations quietly disagreed. InMemoryCallStore kept the whole record
+    including content. PostgresCallStore dropped content on the floor. Fifteen
+    tests passed against the in-memory one while production replayed empty
+    strings into a parser that then failed.
+
+    The rule: find(record(x).idempotency_key) must return something equal to x
+    in every field a caller can observe. Any store that cannot promise that is
+    not a store, and tests/test_store_contract.py is where that promise is
+    checked against all of them.
+    """
+
     @abstractmethod
     def find(self, idempotency_key: str) -> CallRecord | None:
-        """Return a previously recorded call, or None."""
+        """Return a previously recorded call, or None.
+
+        Must round-trip content. A replayed call whose content is empty is
+        worse than no cache at all: it turns a saving into a silent failure.
+        """
 
     @abstractmethod
     def record(self, rec: CallRecord) -> None:
@@ -186,7 +262,8 @@ class PostgresCallStore(CallStore):
                 """
                 select run_id, idempotency_key, role, attempt_kind, attempt_index,
                        model, input_tokens, cached_input_tokens, output_tokens,
-                       cost_usd, status, duration_ms, task_ref, pack_hash, error
+                       cost_usd, status, duration_ms, task_ref, pack_hash, error,
+                       reasoning_tokens, finish_reason, content
                   from model_calls
                  where idempotency_key = %s
                 """,
@@ -207,6 +284,7 @@ class PostgresCallStore(CallStore):
                 input_tokens=row[6],
                 cached_input_tokens=row[7],
                 output_tokens=row[8],
+                reasoning_tokens=row[15] or 0,
             ),
             cost_usd=Decimal(row[9]),
             status=row[10],
@@ -214,7 +292,8 @@ class PostgresCallStore(CallStore):
             task_ref=row[12],
             pack_hash=row[13],
             error=row[14],
-            content="",  # not stored: see the note in MeteredClient.call
+            finish_reason=row[16],
+            content=row[17] or "",
         )
 
     def record(self, rec: CallRecord) -> None:
@@ -224,10 +303,10 @@ class PostgresCallStore(CallStore):
                 insert into model_calls (
                     run_id, idempotency_key, role, attempt_kind, attempt_index,
                     task_ref, model, pack_hash, input_tokens, cached_input_tokens,
-                    output_tokens, cost_usd, status, error, duration_ms,
-                    trace_id, span_id
+                    output_tokens, reasoning_tokens, cost_usd, status, error,
+                    finish_reason, duration_ms, trace_id, span_id, content
                 ) values (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                 )
                 on conflict (idempotency_key) do nothing
                 """,
@@ -235,8 +314,9 @@ class PostgresCallStore(CallStore):
                     rec.run_id, rec.idempotency_key, rec.role, rec.attempt_kind,
                     rec.attempt_index, rec.task_ref, rec.model, rec.pack_hash,
                     rec.usage.input_tokens, rec.usage.cached_input_tokens,
-                    rec.usage.output_tokens, rec.cost_usd, rec.status, rec.error,
-                    rec.duration_ms, rec.trace_id, rec.span_id,
+                    rec.usage.output_tokens, rec.usage.reasoning_tokens,
+                    rec.cost_usd, rec.status, rec.error, rec.finish_reason,
+                    rec.duration_ms, rec.trace_id, rec.span_id, rec.content,
                 ),
             )
 
@@ -321,8 +401,14 @@ class MeteredClient:
         # forever, and no retry could ever dislodge it, because the cache would
         # keep handing back the failure. Errors are recorded for the cost trail
         # and then deliberately ignored here.
+        #
+        # The content check is belt and braces. CallRecord.__post_init__ makes
+        # an 'ok' record with no content unconstructible, so a fresh row cannot
+        # be poisoned. This guards the rows already in the table from before
+        # that invariant existed, which is a real category: an invariant added
+        # today says nothing about data written yesterday.
         cached = self._store.find(key)
-        if cached is not None and cached.status == "ok":
+        if cached is not None and cached.status == "ok" and cached.content:
             return replace(cached, status="replayed")
 
         with tracer.start_as_current_span(f"gen_ai.{role}") as span:
@@ -370,21 +456,55 @@ class MeteredClient:
             usage = _extract_usage(resp)
             cost = self._prices.cost_usd(model, usage)
 
+            finish = _finish_reason(resp)
+
             span.set_attribute("gen_ai.usage.input_tokens", usage.input_tokens)
             span.set_attribute("gen_ai.usage.output_tokens", usage.output_tokens)
             span.set_attribute("gen_ai.usage.cached_input_tokens", usage.cached_input_tokens)
+            span.set_attribute("gen_ai.usage.reasoning_tokens", usage.reasoning_tokens)
             span.set_attribute("gen_ai.response.model", getattr(resp, "model", model))
+            span.set_attribute("gen_ai.response.finish_reasons", [finish or "unknown"])
             span.set_attribute("agentpipe.cost_usd", float(cost))
             span.set_attribute("agentpipe.ratio", usage.ratio)
+            span.set_attribute("agentpipe.answer_tokens", usage.answer_tokens)
             span.set_attribute("agentpipe.status", "ok")
+
+            content = resp.choices[0].message.content or ""
+
+            # A billed call that returned nothing is a failure, not a success.
+            # This is the fix for the poisoning at its source: recording it as
+            # 'ok' is what let an empty row become a permanent cache hit. As an
+            # error it stays in the table for the cost trail, is never replayed,
+            # and the next run tries again.
+            #
+            # finish_reason usually says why. 'length' means the output budget
+            # ran out, and on a reasoning model that means thinking ate the
+            # whole allowance before it could speak.
+            if not content:
+                rec = CallRecord(
+                    run_id=self.run_id, idempotency_key=key, role=role,
+                    attempt_kind=attempt_kind, attempt_index=attempt_index,
+                    model=model, usage=usage, cost_usd=cost, status="error",
+                    duration_ms=duration, task_ref=task_ref, pack_hash=pack,
+                    finish_reason=finish, trace_id=trace_id, span_id=span_id,
+                    error=(
+                        f"model returned no content "
+                        f"(finish_reason={finish}, "
+                        f"output={usage.output_tokens}, "
+                        f"thinking={usage.reasoning_tokens})"
+                    ),
+                )
+                span.set_attribute("agentpipe.status", "empty")
+                self._safe_record(rec)
+                return rec
 
             rec = CallRecord(
                 run_id=self.run_id, idempotency_key=key, role=role,
                 attempt_kind=attempt_kind, attempt_index=attempt_index,
                 model=model, usage=usage, cost_usd=cost, status="ok",
                 duration_ms=duration, task_ref=task_ref, pack_hash=pack,
-                trace_id=trace_id, span_id=span_id,
-                content=resp.choices[0].message.content or "",
+                finish_reason=finish, trace_id=trace_id, span_id=span_id,
+                content=content,
             )
             self._safe_record(rec)
             return rec
@@ -408,16 +528,42 @@ def _extract_usage(resp: Any) -> Usage:
     Defensive on purpose. Providers add fields, rename them, and occasionally
     omit them on streamed or cached responses. Missing usage is a gap in the
     data, not a reason to crash.
+
+    Note that reasoning tokens are a *subset* of completion_tokens, not an
+    addition to them. They are already billed as output. Counting them
+    separately is about visibility, not cost: without it, "thought hard and said
+    nothing" and "had nothing to say" produce identical rows.
     """
     usage = getattr(resp, "usage", None)
     if usage is None:
         return Usage()
 
-    details = getattr(usage, "prompt_tokens_details", None)
-    cached = getattr(details, "cached_tokens", 0) if details else 0
+    prompt_details = getattr(usage, "prompt_tokens_details", None)
+    cached = getattr(prompt_details, "cached_tokens", 0) if prompt_details else 0
+
+    completion_details = getattr(usage, "completion_tokens_details", None)
+    reasoning = (
+        getattr(completion_details, "reasoning_tokens", 0)
+        if completion_details else 0
+    )
 
     return Usage(
         input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
         output_tokens=getattr(usage, "completion_tokens", 0) or 0,
         cached_input_tokens=cached or 0,
+        reasoning_tokens=reasoning or 0,
     )
+
+
+def _finish_reason(resp: Any) -> str | None:
+    """Why the response ended.
+
+    'stop' means the model finished. 'length' means it was cut off mid-thought
+    and whatever you got is a fragment. 'content_filter' means something else
+    entirely. One field, and it turns "the reply was empty" from a mystery into
+    a fact.
+    """
+    try:
+        return resp.choices[0].finish_reason
+    except (AttributeError, IndexError):
+        return None

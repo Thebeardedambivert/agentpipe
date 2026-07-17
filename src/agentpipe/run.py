@@ -25,6 +25,8 @@ def main() -> int:
     ap.add_argument("--repo", default=".", help="repository root")
     ap.add_argument("--model", default="gpt-5.4-mini")
     ap.add_argument("--max-files", type=int, default=5)
+    ap.add_argument("--max-output", type=int, default=None,
+                    help="output token budget. Derived from file sizes if unset.")
     ap.add_argument("--apply", action="store_true", help="actually write files")
     args = ap.parse_args()
 
@@ -49,6 +51,7 @@ def main() -> int:
         result = run_builder(
             ticket, repo, client, args.model,
             max_files=args.max_files,
+            max_output_tokens=args.max_output,
             dry_run=not args.apply,
         )
     except PatchError as exc:
@@ -57,6 +60,13 @@ def main() -> int:
         # and the first one is already in the table.
         print(f"\nthe model's reply could not be used:\n{exc}\n")
         print("The call was still made and billed. Check model_calls.")
+        print()
+        print("  select * from output_shape limit 3;")
+        print()
+        print("If finish_reason is 'length', the model was cut off mid-thought.")
+        print("If reasoning_tokens is high and answer_tokens is 0, it thought")
+        print("and never spoke. If output_tokens is near 0, it had nothing to")
+        print("say, which on a stale ticket is the correct answer.")
         return 1
 
     print()

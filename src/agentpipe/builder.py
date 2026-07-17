@@ -23,9 +23,50 @@ from dataclasses import dataclass
 
 from agentpipe.pack import build
 from agentpipe.patch import FileEdit, apply_edits, parse_edits, summarise
-from agentpipe.repo import Candidate, Repo, select
+from agentpipe.repo import Candidate, Repo, estimate_tokens, select
 from agentpipe.telemetry import CallRecord, MeteredClient
 from agentpipe.ticket import Ticket
+
+
+# Two guesses, labelled as such per CLAUDE.md.
+#
+# The floor is derived, not guessed: RULES asks the model to return the complete
+# contents of every file it changes, so the output must be at least as large as
+# what it is rewriting. That part is arithmetic.
+#
+# These two are not arithmetic:
+#
+# REWRITE_HEADROOM  a rewritten file is usually a bit longer than the original
+# REASONING_FLOOR   a reasoning model spends output tokens thinking before it
+#                   speaks, and we cannot predict how many
+#
+# What would settle them: `select finish_reason, count(*) from model_calls group
+# by 1`. Any 'length' rows mean the budget is too small and the model is being
+# cut off mid-answer. Zero 'length' rows over a few dozen varied tickets means
+# these are big enough, and the reasoning floor could then be tuned down against
+# `avg(reasoning_tokens)` to stop overpaying for headroom nobody uses.
+REWRITE_HEADROOM = 1.5
+REASONING_FLOOR = 2_000
+
+
+def output_budget(
+    repo: Repo,
+    selected: tuple[Candidate, ...],
+    headroom: float = REWRITE_HEADROOM,
+    reasoning_floor: int = REASONING_FLOOR,
+) -> int:
+    """How many output tokens the model is allowed.
+
+    Exists because not setting one is how you get an empty reply: on a reasoning
+    model the thinking eats the whole default allowance and there is nothing
+    left to answer with. The call succeeds, is billed, and returns nothing.
+
+    Parameters rather than constants, deliberately. The numbers above are
+    hypotheses, and a hypothesis you can pass a different value to is one
+    somebody can disprove.
+    """
+    rewriting = sum(estimate_tokens(repo.read(c.path)) for c in selected)
+    return int(rewriting * headroom) + reasoning_floor
 
 
 @dataclass(frozen=True)
@@ -55,6 +96,7 @@ def run_builder(
     attempt: int = 1,
     feedback: str | None = None,
     max_files: int = 5,
+    max_output_tokens: int | None = None,
     dry_run: bool = True,
 ) -> BuildResult:
     """One attempt at a ticket.
@@ -71,6 +113,7 @@ def run_builder(
     """
     selected = select(ticket, repo, max_files=max_files)
     pack = build(ticket, repo, selected, feedback=feedback)
+    budget = max_output_tokens or output_budget(repo, selected)
 
     record = client.call(
         messages=pack.as_list(),
@@ -79,6 +122,7 @@ def run_builder(
         attempt_kind="implement" if feedback is None else "validation_retry",
         attempt_index=attempt,
         task_ref=ticket.ref,
+        max_completion_tokens=budget,
     )
 
     edits = parse_edits(record.content)
@@ -119,8 +163,12 @@ def report(result: BuildResult, repo: Repo, dry_run: bool) -> str:
     lines += [
         "",
         f"actual     in={u.input_tokens:,} (cached {u.cached_input_tokens:,}) "
-        f"out={u.output_tokens:,}",
-        f"ratio      {u.ratio:.1f}",
+        f"out={u.output_tokens:,} (thinking {u.reasoning_tokens:,}, "
+        f"answer {u.answer_tokens:,})",
+        f"ratio      {u.ratio:.1f} billed / {u.answer_ratio:.1f} on answer",
+        f"finish     {result.record.finish_reason}"
+        + ("   <- cut off. Raise --max-output." 
+           if result.record.finish_reason == "length" else ""),
         f"cost       ${result.cost_usd}",
         f"status     {result.record.status}",
     ]

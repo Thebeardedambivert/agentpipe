@@ -136,3 +136,38 @@ def test_selection_is_deterministic(repo):
 def test_no_match_returns_nothing_rather_than_guessing(repo):
     t = ticket_with("Zzzz qqqq wwww vvvv unrelated nonsense words here")
     assert select(t, repo) == ()
+
+
+# --- the fix, and the bug it came from ------------------------------------
+
+def test_hints_are_authoritative_not_advisory(repo):
+    """The real bug, as a test.
+
+    A ticket saying "the file exists at the repo root" used to match repo.py and
+    test_repo.py on the word "repo", adding two irrelevant files and 67% of the
+    pack. A human named the files. Word overlap does not get a vote.
+    """
+    t = ticket_with(
+        "The prices.example.json file exists at the repo root so setup works",
+        "- prices.example.json\n- README.md",
+    )
+    picked = select(t, repo)
+    assert {c.path for c in picked} == {"prices.example.json", "README.md"}
+    assert all(c.reason == "named in ticket" for c in picked)
+
+
+def test_common_words_are_weak_evidence():
+    """Rarity weighting, which is a stopword list that maintains itself.
+
+    A word in every path proves nothing and scores zero. A word in one path is
+    strong evidence. Nobody has to keep a list of boring words up to date.
+    """
+    from agentpipe.repo import _idf
+    idf = _idf(("src/alpha.py", "src/beta.py", "src/gamma.py", "src/delta.py"))
+    assert idf["src"] == 0.0
+    assert idf["alpha"] > 1.0
+
+
+def test_fallback_still_runs_when_no_hints(repo):
+    t = ticket_with("The telemetry module should record cached tokens correctly")
+    assert "src/telemetry.py" in [c.path for c in select(t, repo)]

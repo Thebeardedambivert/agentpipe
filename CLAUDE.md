@@ -83,6 +83,54 @@ The rarity weighting was sound. The threshold on top was not. When a fix has a
 defensible core and a speculative extra, ship the core and delete the extra. The
 extra can come back when there is a number demanding it.
 
+**A test double that disagrees with the real thing is worse than no test.**
+`InMemoryCallStore` kept content. `PostgresCallStore` dropped it and replayed
+empty strings. Fifteen idempotency tests passed against the double while
+production silently broke on every second run, and the failure surfaced as
+"empty reply" and looked like a model problem for an hour.
+
+Where a port has more than one implementation, the contract is tested against
+all of them, in one parameterised file, not per-implementation. See
+`tests/test_store_contract.py`. Adding a third store means adding it to that
+list, not writing new tests for it.
+
+**An invalid state you can build is an invalid state you will build.**
+This is the one that makes the others cheaper. `CallRecord(status="ok",
+content="")` was constructible, so it got constructed, stored, read back, and
+replayed. Four sites could each have caught it. None did, because none of them
+was *the* site.
+
+Guarding at every use site is how you get a codebase made of paranoia that still
+misses the fifth site. Validate at construction: one place, every path in and
+out, including paths nobody has written yet. `__post_init__` on a frozen
+dataclass costs three lines and retires four guards.
+
+Before adding a check, ask whether the thing being checked for could instead be
+made unrepresentable.
+
+**No exception is not success.**
+Every silent failure in this project has been code asking "did it throw?" instead
+of "is it true?". The pytest cache reporting 95 passing tests from a file in the
+wrong folder. `_safe_record` swallowing a paused database. The in-memory store
+agreeing with itself. A row marked 'ok' with nothing in it. None errored. All
+lied. Assert the postcondition, not the absence of a stack trace.
+
+**A cache that does not store the result is not a cache.**
+It is a log of what happened, wearing a cache's clothes, and it will hand
+callers an empty answer while reporting success. If `find()` cannot return
+everything `record()` was given, do not claim to replay.
+
+**Nothing writes to the measurement table except real work.**
+The contract tests wrote fixture rows into a live database, tagged
+task_ref='TASK-1' with invented token counts, and ratio_by_role started averaging
+them in with real calls. The tests for the meter corrupted the meter. Preflight
+did the same thing on a smaller scale, leaving a probe row behind on every run.
+
+Anything that touches a real store from a test or a diagnostic: tag it
+unmistakably, and delete it afterwards in a finally or an autouse fixture, so it
+cleans up on failure too. There is no version of "it is only a few rows" that is
+true when the rows are your evidence.
+
 **A bug found in a real run gets a regression test naming the real run.**
 Not a generic test. One that says what happened, what it cost, and why the fix is
 shaped the way it is. See `test_hints_are_authoritative_not_advisory`.
