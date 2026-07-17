@@ -45,7 +45,15 @@ order by created_at desc;
 --
 -- Read them side by side. A big gap means you are paying for thought, which may
 -- be worth it, but you should know you are doing it.
-create or replace view ratio_by_role as
+--
+-- Dropped first, not replaced. `create or replace view` can only append columns
+-- to the end, and this adds avg_thinking and answer_ratio in the middle, which it
+-- refuses with "cannot change name of view column". Harmless on Supabase, where
+-- this view was built by hand, but fatal on a fresh database applying schema.sql
+-- then this file in order. CI is the fresh database that caught it. Still safe to
+-- run twice: the drop is guarded, the create rebuilds.
+drop view if exists ratio_by_role;
+create view ratio_by_role as
 select
     role,
     count(*)                                                    as calls,
