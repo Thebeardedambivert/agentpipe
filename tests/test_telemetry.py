@@ -173,6 +173,9 @@ def test_store_failure_does_not_fail_the_call():
         def record(self, rec):
             raise RuntimeError("postgres is on fire")
 
+        def latest_for_run(self, run_id):
+            return None
+
     rec = make(FakeOpenAI(), BrokenStore()).call(
         messages=MESSAGES, model="test-model", role="builder",
         attempt_kind="implement", task_ref="TASK-1",

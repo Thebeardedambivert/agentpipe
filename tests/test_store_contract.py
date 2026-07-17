@@ -203,3 +203,29 @@ def test_errors_round_trip(make_store):
     got = store.find(rec.idempotency_key)
     assert got.status == "error"
     assert got.error == "provider exploded"
+
+
+@stores
+def test_latest_for_run_returns_the_highest_attempt_with_its_content(make_store):
+    """What makes a crashed run resumable.
+
+    The latest attempt's index says where to continue, and its stored content is
+    what we re-apply to recover work that was recorded but never reached disk. So
+    this must return the highest-numbered attempt for the run, content included.
+    """
+    store = make_store()
+    run = str(uuid.uuid4())
+    store.record(_record(run_id=run, attempt_index=1, content="first reply"))
+    store.record(_record(run_id=run, attempt_index=2, content="second reply"))
+
+    got = store.latest_for_run(run)
+    assert got is not None
+    assert got.attempt_index == 2
+    assert got.content == "second reply"
+
+
+@stores
+def test_latest_for_run_is_none_for_an_unknown_run(make_store):
+    # A real, well-formed run id that simply was never recorded. run_id is a uuid
+    # column, so the value has to be a valid uuid, not arbitrary text.
+    assert make_store().latest_for_run(str(uuid.uuid4())) is None
