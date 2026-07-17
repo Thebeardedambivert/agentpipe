@@ -227,6 +227,15 @@ class CallStore(ABC):
     def record(self, rec: CallRecord) -> None:
         """Append a call. Must be atomic on idempotency_key."""
 
+    @abstractmethod
+    def latest_for_run(self, run_id: str) -> CallRecord | None:
+        """The highest-attempt call recorded for this run, or None.
+
+        This is what makes a crashed run resumable. Its attempt_index says where
+        to continue, and its stored content lets us re-apply work that was
+        recorded but may never have reached disk, without paying for it again.
+        """
+
 
 class InMemoryCallStore(CallStore):
     """For tests, and for the first hour of Layer 0 before you wire Supabase."""
@@ -239,6 +248,10 @@ class InMemoryCallStore(CallStore):
 
     def record(self, rec: CallRecord) -> None:
         self.records.setdefault(rec.idempotency_key, rec)
+
+    def latest_for_run(self, run_id: str) -> CallRecord | None:
+        matches = [r for r in self.records.values() if r.run_id == run_id]
+        return max(matches, key=lambda r: r.attempt_index, default=None)
 
 
 class PostgresCallStore(CallStore):
@@ -256,23 +269,18 @@ class PostgresCallStore(CallStore):
         self._psycopg = psycopg
         self._dsn = dsn or os.environ["AGENTPIPE_DSN"]
 
-    def find(self, idempotency_key: str) -> CallRecord | None:
-        with self._psycopg.connect(self._dsn) as conn:
-            row = conn.execute(
-                """
-                select run_id, idempotency_key, role, attempt_kind, attempt_index,
-                       model, input_tokens, cached_input_tokens, output_tokens,
-                       cost_usd, status, duration_ms, task_ref, pack_hash, error,
-                       reasoning_tokens, finish_reason, content
-                  from model_calls
-                 where idempotency_key = %s
-                """,
-                (idempotency_key,),
-            ).fetchone()
+    # One column list, one row-to-record mapping, used by every read. find and
+    # latest_for_run returning different shapes of the same row is exactly the
+    # store-divergence bug this project was burned by, so they share this.
+    _COLS = (
+        "run_id, idempotency_key, role, attempt_kind, attempt_index, model, "
+        "input_tokens, cached_input_tokens, output_tokens, cost_usd, status, "
+        "duration_ms, task_ref, pack_hash, error, reasoning_tokens, "
+        "finish_reason, content"
+    )
 
-        if row is None:
-            return None
-
+    @staticmethod
+    def _to_record(row) -> CallRecord:
         return CallRecord(
             run_id=str(row[0]),
             idempotency_key=row[1],
@@ -295,6 +303,23 @@ class PostgresCallStore(CallStore):
             finish_reason=row[16],
             content=row[17] or "",
         )
+
+    def find(self, idempotency_key: str) -> CallRecord | None:
+        with self._psycopg.connect(self._dsn) as conn:
+            row = conn.execute(
+                f"select {self._COLS} from model_calls where idempotency_key = %s",
+                (idempotency_key,),
+            ).fetchone()
+        return self._to_record(row) if row is not None else None
+
+    def latest_for_run(self, run_id: str) -> CallRecord | None:
+        with self._psycopg.connect(self._dsn) as conn:
+            row = conn.execute(
+                f"select {self._COLS} from model_calls "
+                "where run_id = %s order by attempt_index desc limit 1",
+                (run_id,),
+            ).fetchone()
+        return self._to_record(row) if row is not None else None
 
     def record(self, rec: CallRecord) -> None:
         with self._psycopg.connect(self._dsn) as conn:
@@ -520,6 +545,15 @@ class MeteredClient:
             self._store.record(rec)
         except Exception as exc:  # noqa: BLE001
             print(f"[agentpipe] WARN: failed to record call {rec.idempotency_key}: {exc}")
+
+    def latest_attempt(self) -> CallRecord | None:
+        """The most recent attempt recorded for this run, or None.
+
+        For resuming a crashed run: the caller builds this client with the run_id
+        it wants to continue, and this says where that run got to. Store access
+        stays behind the one door.
+        """
+        return self._store.latest_for_run(self.run_id)
 
 
 def _extract_usage(resp: Any) -> Usage:

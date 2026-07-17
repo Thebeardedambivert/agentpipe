@@ -14,13 +14,21 @@ they behave the same on the Windows dev machine and Linux CI.
 from __future__ import annotations
 
 import subprocess
+import uuid
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
 
 from agentpipe.loop import run_loop
 from agentpipe.repo import Repo
-from agentpipe.telemetry import InMemoryCallStore, MeteredClient, PriceMap
+from agentpipe.telemetry import (
+    CallRecord,
+    InMemoryCallStore,
+    MeteredClient,
+    PriceMap,
+    Usage,
+)
 from agentpipe.ticket import Ticket
 
 PRICES = PriceMap({"fake": {"input": 1.0, "cached_input": 0.1, "output": 10.0}})
@@ -199,3 +207,73 @@ def test_green_validation_but_failing_acceptance_warns(repo):
     assert r.verdict == "pass"
     assert r.acceptance_warning is not None
     assert "acceptance" in r.acceptance_warning
+
+
+# --- resume: continuing a crashed run -------------------------------------
+
+def _recorded(run_id: str, attempt_index: int, content: str, status: str = "ok"):
+    """A CallRecord as if a prior attempt had been recorded before a crash."""
+    return CallRecord(
+        run_id=run_id, idempotency_key=f"k-{uuid.uuid4()}", role="builder",
+        attempt_kind="implement", attempt_index=attempt_index, model="fake",
+        usage=Usage(input_tokens=1500, output_tokens=120),
+        cost_usd=Decimal("0.0027"), status=status, duration_ms=10,
+        task_ref="TASK-LOOP", pack_hash="ph", content=content,
+    )
+
+
+def test_resume_recovers_landed_work_for_free(repo):
+    """The crash happened after the fix was recorded. Resume re-applies the stored
+    reply, finds the ticket already satisfied, and spends nothing: no new call."""
+    store = InMemoryCallStore()
+    run = "run-resume-landed"
+    store.record(_recorded(run, 2, PATCH_42))
+    fake = SequencedFakeOpenAI([PATCH_42])
+    client = MeteredClient(store=store, prices=PRICES, client=fake, run_id=run)
+
+    r = run_loop(_ticket(VALIDATE_IS_42), repo, client, "fake",
+                 max_attempts=3, resume=True)
+    assert r.verdict == "pass"
+    assert fake.calls == 0  # recovered from the stored reply, model never re-called
+
+
+def test_resume_continues_from_the_next_attempt(repo):
+    """The recorded attempt was still wrong. Resume recovers it, sees validation
+    fail, and continues from the next attempt, not from 1."""
+    store = InMemoryCallStore()
+    run = "run-resume-continue"
+    store.record(_recorded(run, 1, PATCH_7))
+    fake = SequencedFakeOpenAI([PATCH_42])
+    client = MeteredClient(store=store, prices=PRICES, client=fake, run_id=run)
+
+    r = run_loop(_ticket(VALIDATE_IS_42), repo, client, "fake",
+                 max_attempts=3, resume=True)
+    assert r.verdict == "pass"
+    assert fake.calls == 1  # exactly one NEW attempt, not a redo of attempt 1
+    assert r.results[0].record.attempt_index == 2  # resumed at 2
+
+
+def test_resume_with_no_history_starts_fresh(repo):
+    store = InMemoryCallStore()
+    fake = SequencedFakeOpenAI([PATCH_42])
+    client = MeteredClient(store=store, prices=PRICES, client=fake, run_id="never-ran")
+
+    r = run_loop(_ticket(VALIDATE_IS_42), repo, client, "fake",
+                 max_attempts=3, resume=True)
+    assert r.verdict == "pass"
+    assert r.attempts == 1
+
+
+def test_resume_with_budget_already_spent_is_exhausted(repo):
+    """The last allowed attempt was recorded and still fails. Resume recovers it,
+    finds no budget left, and stops without a new call."""
+    store = InMemoryCallStore()
+    run = "run-resume-spent"
+    store.record(_recorded(run, 3, PATCH_7))
+    fake = SequencedFakeOpenAI([PATCH_42])
+    client = MeteredClient(store=store, prices=PRICES, client=fake, run_id=run)
+
+    r = run_loop(_ticket(VALIDATE_IS_42), repo, client, "fake",
+                 max_attempts=3, resume=True)
+    assert r.verdict == "exhausted"
+    assert fake.calls == 0

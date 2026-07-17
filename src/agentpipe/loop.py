@@ -36,9 +36,9 @@ from langgraph.graph import END, START, StateGraph
 
 from agentpipe.builder import BuildResult, run_builder
 from agentpipe.checks import CheckResult, Outcome, Verdict, assess, run_checks
-from agentpipe.patch import PatchError
+from agentpipe.patch import PatchError, apply_edits, parse_edits
 from agentpipe.repo import Repo
-from agentpipe.telemetry import MeteredClient
+from agentpipe.telemetry import CallRecord, MeteredClient
 from agentpipe.ticket import Ticket
 
 # How much of a validation failure to feed back into the next attempt. A ceiling,
@@ -131,7 +131,7 @@ def _validate_node(state: LoopState) -> dict[str, Any]:
 
     if all(r.outcome is Outcome.PASS for r in results):
         return {"verdict": "pass", "validation": results,
-                "acceptance_warning": _acceptance_disagreement(state)}
+                "acceptance_warning": _acceptance_disagreement(state["ticket"], state["repo"])}
 
     feedback = _combine_output(results, state["feedback_max_chars"])
     return _decide_fail(state, feedback, results)
@@ -151,7 +151,7 @@ def _decide_fail(
     }
 
 
-def _acceptance_disagreement(state: LoopState) -> Optional[str]:
+def _acceptance_disagreement(ticket: Ticket, repo: Repo) -> Optional[str]:
     """Validation passed. Do the ticket's acceptance checks agree?
 
     A warning, not a gate. Validation (pytest) passing does not prove this
@@ -160,10 +160,9 @@ def _acceptance_disagreement(state: LoopState) -> Optional[str]:
     green tests over unfinished work. Surfacing it here makes the gap visible;
     Layer 6's judge is what actually closes it.
     """
-    ticket = state["ticket"]
     if not ticket.checks:
         return None
-    decision = assess(ticket, state["repo"].root)
+    decision = assess(ticket, repo.root)
     if decision.verdict is Verdict.SATISFIED:
         return None
     return f"validation passed but acceptance checks did not: {decision.reason}"
@@ -205,12 +204,26 @@ def run_loop(
     model: str,
     max_attempts: int = 3,
     feedback_max_chars: int = FEEDBACK_MAX_CHARS,
+    resume: bool = False,
 ) -> LoopResult:
     """Run the build/validate/retry loop until it passes, gives up, or breaks.
 
     Writes to the working tree on every attempt, because validation runs against
     real files. Run it on a scratch repo or a clean git state you can reset.
+
+    `resume` continues a crashed run: the caller builds `client` with the run_id
+    it wants to continue, and the loop recovers where that run got to (see
+    `_resume`) rather than starting over.
     """
+    start_attempt = 1
+    feedback: Optional[str] = None
+
+    if resume:
+        recovered = _resume(ticket, repo, client, max_attempts, feedback_max_chars)
+        if isinstance(recovered, LoopResult):
+            return recovered  # the recovered state already decides the outcome
+        start_attempt, feedback = recovered
+
     app = _compile_graph()
     initial: LoopState = {
         "ticket": ticket,
@@ -219,8 +232,8 @@ def run_loop(
         "model": model,
         "max_attempts": max_attempts,
         "feedback_max_chars": feedback_max_chars,
-        "attempt": 1,
-        "feedback": None,
+        "attempt": start_attempt,
+        "feedback": feedback,
         "build_error": None,
         "results": [],
         "verdict": "",
@@ -239,6 +252,57 @@ def run_loop(
         validation=final["validation"],
         acceptance_warning=final.get("acceptance_warning"),
     )
+
+
+def _resume(ticket, repo, client, max_attempts, feedback_max_chars):
+    """Prepare a crashed run to continue.
+
+    The counter is a hint; the repo is the truth. We recover the last recorded
+    attempt's work from its stored reply (free), then let validation against the
+    real files decide, never the counter. Returns a finished LoopResult when the
+    recovered state already passes or the budget is spent, otherwise the
+    (start_attempt, feedback) to continue with.
+    """
+    prior = client.latest_attempt()
+    if prior is None:
+        return 1, None  # nothing recorded for this run; a fresh start
+
+    _reapply_recorded_reply(prior, ticket, repo)
+
+    results = run_checks(ticket.validation, repo.root)
+    if all(r.outcome is Outcome.PASS for r in results):
+        # The crash happened after the fix landed. Nothing left to do, nothing to
+        # pay: the repo already satisfies the ticket.
+        return LoopResult(
+            "pass", prior.attempt_index, (), results,
+            _acceptance_disagreement(ticket, repo),
+        )
+
+    start_attempt = prior.attempt_index + 1
+    if start_attempt > max_attempts:
+        return LoopResult("exhausted", prior.attempt_index, (), results, None)
+
+    # Rebuild the feedback from the real repo, not from memory we no longer have.
+    return start_attempt, _combine_output(results, feedback_max_chars)
+
+
+def _reapply_recorded_reply(prior: CallRecord, ticket: Ticket, repo: Repo) -> None:
+    """Re-apply a recorded attempt's stored reply, for free.
+
+    This closes the cost side of the resume window. An attempt can be recorded
+    (billed) and then lost before its files reach disk. Because the reply was
+    stored (migration 002), we re-apply it here instead of paying the model to
+    redo it. Idempotent: if the work already landed, this rewrites identical
+    bytes. An attempt whose reply was not applicable (the model returned prose)
+    has nothing to recover, and that is fine; the loop rebuilds from real state.
+    """
+    if prior.status not in ("ok", "replayed") or not prior.content:
+        return
+    try:
+        edits = parse_edits(prior.content)
+        apply_edits(repo, edits, allowed=ticket.files_hint or None, dry_run=False)
+    except PatchError:
+        return
 
 
 def report_loop(result: LoopResult) -> str:

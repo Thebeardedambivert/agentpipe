@@ -33,6 +33,9 @@ def main() -> int:
     ap.add_argument("--max-attempts", type=int, default=1,
                     help="more than 1 runs the validation loop, which writes "
                          "the working tree on every attempt")
+    ap.add_argument("--resume", default=None, metavar="RUN_ID",
+                    help="resume a crashed loop by its run id "
+                         "(printed when a loop starts)")
     args = ap.parse_args()
 
     try:
@@ -74,16 +77,21 @@ def main() -> int:
         # does nothing is the same trap as a test that silently skips.
         print("note: this ticket has no acceptance checks, so staleness is unguarded.")
 
-    client = MeteredClient(store=PostgresCallStore(), prices=PriceMap.from_env())
+    client = MeteredClient(store=PostgresCallStore(), prices=PriceMap.from_env(),
+                           run_id=args.resume)
 
     if args.max_attempts > 1:
         # The loop writes on every attempt, because validation runs against real
         # files. Writing is a decision, so it is opt-in via --max-attempts and
         # announced rather than silent.
-        print(f"\nrunning up to {args.max_attempts} attempts; this writes to the "
-              f"working tree on each one.\n")
+        verb = "resuming" if args.resume else "running"
+        print(f"\n{verb} up to {args.max_attempts} attempts; this writes to the "
+              f"working tree on each one.")
+        # Print the run id so a crash can be resumed with --resume.
+        print(f"run id: {client.run_id}  (resume with --resume {client.run_id})\n")
         loop_result = run_loop(
-            ticket, repo, client, args.model, max_attempts=args.max_attempts
+            ticket, repo, client, args.model,
+            max_attempts=args.max_attempts, resume=bool(args.resume),
         )
         print(report_loop(loop_result))
         print()
