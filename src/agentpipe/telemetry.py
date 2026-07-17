@@ -32,6 +32,41 @@ AttemptKind = Literal["implement", "validation_retry", "review_fix", "review", "
 tracer = trace.get_tracer("agentpipe.telemetry")
 
 
+def configure_tracing(console: bool | None = None) -> None:
+    """Turn the no-op tracer into a real one, so trace_id and span_id stop being
+    zeros.
+
+    Without this, the OTel API's default provider throws every span away and the
+    seam records all-zero ids: the span columns look official and hold nothing.
+    With it, ids are real and a run's calls share a trace_id, so the ledger's
+    trace columns become queryable, and a run reads as a tree rather than a list.
+
+    Opt-in, called from the CLI entry rather than on import, so library and test
+    use stay no-op and nothing sets global OTel state behind a caller's back.
+    Idempotent: a second call is a no-op, which keeps OTel from warning about a
+    provider being overridden.
+
+    Spans export to the console only when asked (`console=True` or
+    AGENTPIPE_TRACE_CONSOLE); otherwise they are recorded with real ids and not
+    shipped anywhere, which is all the database ledger needs. A real backend
+    (an OTLP collector) is a one-processor change here, once there is a viewer
+    worth pointing it at.
+    """
+    from opentelemetry.sdk.trace import TracerProvider
+
+    if isinstance(trace.get_tracer_provider(), TracerProvider):
+        return  # already configured
+
+    provider = TracerProvider()
+    if console or (console is None and os.environ.get("AGENTPIPE_TRACE_CONSOLE")):
+        from opentelemetry.sdk.trace.export import (
+            ConsoleSpanExporter,
+            SimpleSpanProcessor,
+        )
+        provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
+    trace.set_tracer_provider(provider)
+
+
 # ---------------------------------------------------------------------------
 # Prices
 # ---------------------------------------------------------------------------

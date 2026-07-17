@@ -17,7 +17,12 @@ from agentpipe.checks import Verdict, assess
 from agentpipe.loop import report_loop, run_loop
 from agentpipe.patch import PatchError
 from agentpipe.repo import Repo, RepoError
-from agentpipe.telemetry import MeteredClient, PostgresCallStore, PriceMap
+from agentpipe.telemetry import (
+    MeteredClient,
+    PostgresCallStore,
+    PriceMap,
+    configure_tracing,
+)
 from agentpipe.ticket import Ticket, TicketError
 
 
@@ -37,6 +42,10 @@ def main() -> int:
                     help="resume a crashed loop by its run id "
                          "(printed when a loop starts)")
     args = ap.parse_args()
+
+    # Make trace ids real for this run. No-op unless the SDK is present, and it
+    # is; safe to call once here at the entry point.
+    configure_tracing()
 
     try:
         ticket = Ticket.from_file(args.ticket)

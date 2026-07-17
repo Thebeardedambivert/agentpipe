@@ -33,6 +33,7 @@ from decimal import Decimal
 from typing import Annotated, Any, Optional, TypedDict
 
 from langgraph.graph import END, START, StateGraph
+from opentelemetry import trace as otel_trace
 
 from agentpipe.builder import BuildResult, run_builder
 from agentpipe.checks import CheckResult, Outcome, Verdict, assess, run_checks
@@ -40,6 +41,8 @@ from agentpipe.patch import PatchError, apply_edits, parse_edits
 from agentpipe.repo import Repo
 from agentpipe.telemetry import CallRecord, MeteredClient
 from agentpipe.ticket import Ticket
+
+_tracer = otel_trace.get_tracer("agentpipe.loop")
 
 # How much of a validation failure to feed back into the next attempt. A ceiling,
 # not a tuned number: enough that the model sees the real error, bounded so a
@@ -240,10 +243,16 @@ def run_loop(
         "validation": (),
         "acceptance_warning": None,
     }
-    # Each attempt is two supersteps (build, validate). Give the graph headroom
-    # above that so our own "exhausted" verdict is what stops the loop, not
-    # LangGraph's recursion_limit raising GraphRecursionError from underneath us.
-    final = app.invoke(initial, config={"recursion_limit": 2 * max_attempts + 5})
+    # One span per run, so a run's per-call spans nest under it and share a
+    # trace_id: the tree PLAN.md said the trace would become at Layer 3. With no
+    # tracer configured this is a no-op and costs nothing.
+    with _tracer.start_as_current_span("agentpipe.run") as span:
+        span.set_attribute("agentpipe.task_ref", ticket.ref)
+        span.set_attribute("agentpipe.max_attempts", max_attempts)
+        # Each attempt is two supersteps (build, validate). Give the graph
+        # headroom above that so our own "exhausted" verdict is what stops the
+        # loop, not LangGraph's recursion_limit raising GraphRecursionError.
+        final = app.invoke(initial, config={"recursion_limit": 2 * max_attempts + 5})
 
     return LoopResult(
         verdict=final["verdict"],

@@ -106,6 +106,13 @@ did this run cost". At Layer 0 there is one call and no tree.
 Fix at Layer 3, when a run becomes builder then validate then retry, and cost
 needs a shape rather than a list. Wire an exporter then and the zeros become real.
 
+Resolved at Layer 3. `configure_tracing()` sets a real TracerProvider (opt-in,
+from the CLI, so tests stay no-op), and `run_loop` wraps a run in a parent span.
+A run's per-attempt calls now nest under it and share a real trace_id: the ids
+stopped being zeros and a run reads as a tree. Shipping spans to a real backend
+is one processor added in `configure_tracing`, once there is a viewer to point
+it at.
+
 **Known gap: reasoning tokens are invisible.**
 
 `_extract_usage` reads `completion_tokens`, which includes reasoning tokens but
@@ -183,10 +190,10 @@ holds when it is inconvenient, it will hold.
 **Goal:** run validation, feed real failures back, stop at a limit.
 
 **Tasks**
-- [ ] Validation runner that executes the ticket's declared commands
-- [ ] Conditional edge: pass, or rebuild and retry
-- [ ] Attempt counter that survives a process crash
-- [ ] Hard stop at N attempts, marked blocked, human notified
+- [x] Validation runner that executes the ticket's declared commands
+- [x] Conditional edge: pass, or rebuild and retry
+- [x] Attempt counter that survives a process crash
+- [x] Hard stop at N attempts, marked blocked, human notified
 
 **Decisions and why**
 
