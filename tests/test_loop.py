@@ -28,6 +28,7 @@ from agentpipe.telemetry import (
     MeteredClient,
     PriceMap,
     Usage,
+    configure_tracing,
 )
 from agentpipe.ticket import Ticket
 
@@ -277,3 +278,26 @@ def test_resume_with_budget_already_spent_is_exhausted(repo):
                  max_attempts=3, resume=True)
     assert r.verdict == "exhausted"
     assert fake.calls == 0
+
+
+# --- tracing: the zeros become real ---------------------------------------
+
+def test_a_run_is_one_trace_with_real_ids(repo):
+    """With tracing configured, a run's attempts share one non-zero trace id.
+
+    This proves both halves of the Layer 3 tracing fix at once: the ids stop being
+    all-zeros, and a run is a tree (its per-attempt calls nest under one run span)
+    rather than a list of unrelated calls. configure_tracing sets a process-global
+    provider; it is idempotent and harmless to the other tests, which never assert
+    on trace ids.
+    """
+    configure_tracing()
+    client, _ = client_for([PATCH_7, PATCH_42])  # fail once, then pass: two calls
+    r = run_loop(_ticket(VALIDATE_IS_42), repo, client, "fake", max_attempts=3)
+
+    assert r.verdict == "pass"
+    assert len(r.results) == 2
+    trace_ids = {res.record.trace_id for res in r.results}
+    assert len(trace_ids) == 1  # both attempts belong to the same trace
+    (tid,) = trace_ids
+    assert set(tid) != {"0"}  # and it is a real id, not all zeros

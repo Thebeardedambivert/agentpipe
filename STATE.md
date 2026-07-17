@@ -6,17 +6,19 @@ CLAUDE.md is the rules. PLAN.md is the design. This is the situation.
 
 ## Built
 
-Layers 0, 1 and 2. 106 tests, all passing. CI (`.github/workflows/ci.yml`) runs
-them against a real Postgres on every push.
+Layers 0, 1, 2 and 3. 130 tests, all passing. CI (`.github/workflows/ci.yml`)
+runs them against a real Postgres on every push.
 
 ```
 telemetry.py   the seam. Every model call goes through MeteredClient.call()
 ticket.py      the contract. Refuses vague tickets before anything is billed
+checks.py      the staleness gate and the validation runner. Exit-code contract
 repo.py        git ls-files, plus which files are worth paying for
 pack.py        assembly, ordered by volatility so the cache prefix stays stable
 patch.py       parses the model's reply, refuses ambiguity, writes to disk
-builder.py     the wiring. Ticket in, files out. One shot, no loop
-run.py         CLI. Dry run by default
+builder.py     the wiring for one attempt. Ticket in, files out
+loop.py        the LangGraph loop: build, validate, retry, resume. Layer 3
+run.py         CLI. Dry run by default; --max-attempts runs the loop
 preflight.py   four checks before you trust any number
 ```
 
@@ -34,11 +36,23 @@ from a working instrument, not a measurement.
 
 **Two things that row is not telling you:**
 
-`cache_hit_pct` is 0. Layer 1's whole argument (stable content first, never
-interpolate into RULES, the prefix test) is **unproven**. Every run has either
-been a first call or a replay from our own table. The 90% cached-input discount
-has never appeared on a real invoice. First honest test is Layer 3, when attempt
-2 sends the same prefix plus feedback.
+`cache_hit_pct` is 0 on this row, but Layer 1's argument is no longer unproven.
+A controlled two-call probe (identical prefix, different suffix, `gpt-5.4-mini`,
+back to back) showed it fire:
+
+```
+call 1 (cold)  input 3,604   cached 0
+call 2 (warm)  input 3,607   cached 3,328   cache_hit 92%
+```
+
+So stable-content-first genuinely earns the cached-input discount: 92% of the
+repeated prefix billed at the cached rate. **The catch, and it is the real
+lesson:** the prefix had to be padded to ~3,600 tokens to see it, because the
+provider only caches prompts above ~1,024 tokens. A real ticket's RULES block is
+a few hundred tokens, so on a small repo a loop's attempt 2 still reads 0%: the
+design is correct, but the discount only engages once packs are large. The
+70k-to-100 thesis's biggest lever works, and now we know the exact condition
+under which it turns on.
 
 `avg_thinking` is 0. This model spends no reasoning tokens here, so the output
 budget in `builder.py` solves a problem that has not occurred. Still correct to
@@ -50,9 +64,10 @@ have. Was not the fix it was sold as.
 `tickets/TASK-1.md` now carries acceptance checks, so running it stops for free
 at the staleness gate instead of rewriting a correct file (see item 2). It is no
 longer a good demo of the pipeline doing work, because it correctly does none.
-The pipeline still has no real ticket of its own. Write something real: the
-tracing gap below is the obvious candidate. (The CI workflow once suggested here
-exists, built by hand as `.github/workflows/ci.yml`, not through the pipeline.)
+The pipeline still has no real ticket of its own: something whose work does not
+already exist, that a real model has to implement and the loop has to validate.
+That is the first honest end-to-end run of Layer 3, and the natural place the real
+cache number finally gets measured on a realistic pack rather than a padded probe.
 
 **2. The stale ticket hole. (Partially closed.)**
 Nothing used to ask "is this already true?", so the agent always did something.
@@ -75,11 +90,14 @@ Still open, and deliberately so:
 - Trust boundary: checks run with your privileges. Fine while you author your own
   tickets, needs a sandbox the day they come from anywhere you do not control.
 
-**3. Layer 3, the loop.**
-Where LangGraph finally earns its place, where the cache claim gets tested, and
-where A1.5's idempotency tension springs for real. `checks.py` is the seed of its
-validation runner: the same check run before is the staleness gate, run after is
-the success check. See PLAN.md.
+**3. Layer 3 is built. Next is Layer 5 or 6.**
+The loop, crash-safe resume, and the tracing tree are done; the cache claim is
+proven (92%, above the ~1,024-token threshold; see the baseline). Per PLAN.md the
+honest next steps are Layer 5 (reviewer and fixer, the biggest cost lever, via
+model routing) and Layer 6 (the eval gate before review). Layer 4 (event-sourced
+replay) and Layer 7 (Temporal) are the industrial layers: worth it at volume or
+for the learning, not before. `checks.py` already seeded the validation runner:
+the same check run before is the staleness gate, run after is the success check.
 
 ## Decisions already made, so nobody relitigates them
 
@@ -108,11 +126,14 @@ and the span hardcodes `gen_ai.system = "openai"`, which would be a lie.
 
 ## Known gaps
 
-One open, one just closed. Both were recorded in PLAN.md under Layer 0.
+Both of the Layer 0 gaps recorded in PLAN.md are now closed.
 
-**Spans go nowhere.** `trace_id` and `span_id` write as all zeros. No tracer is
-configured, so OTel's no-op default accepts every span and discards it. The
-ledger is real, the trace is not. Fix at Layer 3.
+**Spans go nowhere. (Closed.)** `trace_id` and `span_id` used to write as all
+zeros, because no tracer was configured and OTel's no-op default discarded every
+span. Closed at Layer 3: `configure_tracing()` sets a real TracerProvider
+(opt-in, from the CLI, so tests stay no-op), and `run_loop` wraps a run in a
+parent span, so a run's calls now share a real trace_id and read as a tree.
+Shipping spans to a real backend is one processor away, once there is a viewer.
 
 **Contract tests skip without a DSN. (Closed.)** `tests/test_store_contract.py`
 only runs against Postgres when `AGENTPIPE_DSN` is set, so a bare CI job would
