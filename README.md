@@ -112,9 +112,10 @@ no dashboard, because you will believe it.
 pytest -q
 ```
 
-15 tests. They do not test whether OpenAI works. They test whether the three
-guarantees hold: never pay twice, the cost number is right, and the meter never
-kills the run.
+106 tests. The Layer 0 ones do not test whether OpenAI works. They test whether
+the three guarantees hold: never pay twice, the cost number is right, and the
+meter never kills the run. The rest cover the context builder and patch parsing
+from Layers 1 and 2, and run against a real Postgres in CI on every push.
 
 Two of them exist because of bugs found while writing the first version. The
 interesting one: the original code replayed *any* cached call, including
