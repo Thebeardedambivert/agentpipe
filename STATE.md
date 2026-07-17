@@ -6,7 +6,8 @@ CLAUDE.md is the rules. PLAN.md is the design. This is the situation.
 
 ## Built
 
-Layers 0, 1 and 2. 106 tests, all passing.
+Layers 0, 1 and 2. 106 tests, all passing. CI (`.github/workflows/ci.yml`) runs
+them against a real Postgres on every push.
 
 ```
 telemetry.py   the seam. Every model call goes through MeteredClient.call()
@@ -48,7 +49,10 @@ have. Was not the fix it was sold as.
 **1. A ticket that is not already done.**
 `tickets/TASK-1.md` asks for `prices.example.json`, which exists and is correct.
 The pipeline rewrites it anyway, 20 lines to 20 lines. Do not `--apply` it.
-Write something real: a CI workflow running pytest, or the tracing gap below.
+Write something real: the tracing gap below is the obvious candidate. (The CI
+workflow once suggested here now exists, built by hand as
+`.github/workflows/ci.yml`, not through the pipeline. The pipeline still has no
+real ticket of its own.)
 
 **2. The stale ticket hole.**
 Nothing in the pipeline asks "is this already true?". The agent always does
@@ -87,17 +91,21 @@ and the span hardcodes `gen_ai.system = "openai"`, which would be a lie.
 
 ## Known gaps
 
-Both recorded in PLAN.md under Layer 0, repeated here so they are not missed:
+One open, one just closed. Both were recorded in PLAN.md under Layer 0.
 
 **Spans go nowhere.** `trace_id` and `span_id` write as all zeros. No tracer is
 configured, so OTel's no-op default accepts every span and discards it. The
 ledger is real, the trace is not. Fix at Layer 3.
 
-**Contract tests skip without a DSN.** `tests/test_store_contract.py` only runs
-against Postgres when `AGENTPIPE_DSN` is set, so a bare CI job would skip the
-tests that exist to catch store divergence. That is the same hole as the bug they
-were written for: a promise nobody checks. CI needs a Postgres service container,
-not a skip.
+**Contract tests skip without a DSN. (Closed.)** `tests/test_store_contract.py`
+only runs against Postgres when `AGENTPIPE_DSN` is set, so a bare CI job would
+have skipped the tests that catch store divergence: a promise nobody checks.
+Closed by `.github/workflows/ci.yml`, which attaches a real Postgres 16, loads
+the schema and migrations, and sets the DSN, so those tests run on every push.
+The first run also caught a latent bug: migration 001 inserts columns into the
+middle of the `ratio_by_role` view, which `create or replace view` refuses on a
+fresh database. It never showed on Supabase, which was built by hand. CI was the
+first clean-room replay of the schema, start to finish.
 
 ## Environment
 
