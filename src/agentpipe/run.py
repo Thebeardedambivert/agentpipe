@@ -14,6 +14,7 @@ import sys
 
 from agentpipe.builder import report, run_builder
 from agentpipe.checks import Verdict, assess
+from agentpipe.loop import report_loop, run_loop
 from agentpipe.patch import PatchError
 from agentpipe.repo import Repo, RepoError
 from agentpipe.telemetry import MeteredClient, PostgresCallStore, PriceMap
@@ -29,6 +30,9 @@ def main() -> int:
     ap.add_argument("--max-output", type=int, default=None,
                     help="output token budget. Derived from file sizes if unset.")
     ap.add_argument("--apply", action="store_true", help="actually write files")
+    ap.add_argument("--max-attempts", type=int, default=1,
+                    help="more than 1 runs the validation loop, which writes "
+                         "the working tree on every attempt")
     args = ap.parse_args()
 
     try:
@@ -71,6 +75,19 @@ def main() -> int:
         print("note: this ticket has no acceptance checks, so staleness is unguarded.")
 
     client = MeteredClient(store=PostgresCallStore(), prices=PriceMap.from_env())
+
+    if args.max_attempts > 1:
+        # The loop writes on every attempt, because validation runs against real
+        # files. Writing is a decision, so it is opt-in via --max-attempts and
+        # announced rather than silent.
+        print(f"\nrunning up to {args.max_attempts} attempts; this writes to the "
+              f"working tree on each one.\n")
+        loop_result = run_loop(
+            ticket, repo, client, args.model, max_attempts=args.max_attempts
+        )
+        print(report_loop(loop_result))
+        print()
+        return 0 if loop_result.ok else 1
 
     try:
         result = run_builder(
