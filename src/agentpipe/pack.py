@@ -83,7 +83,7 @@ def _ticket_block(ticket: Ticket) -> str:
         parts += [f"- {c}" for c in ticket.constraints]
 
     parts += ["", "## Acceptance criteria"]
-    parts += [f"- {a}" for a in ticket.acceptance]
+    parts += [f"- {a.text}" for a in ticket.acceptance]
 
     parts += ["", "## These commands decide whether you succeeded"]
     parts += [f"- {v}" for v in ticket.validation]
