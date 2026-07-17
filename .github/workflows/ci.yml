@@ -1,0 +1,70 @@
+name: tests
+
+# Run on every push and every pull request. A test suite that only runs when
+# you remember to run it is the same promise-nobody-checks hole the contract
+# tests were written to close.
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+
+    # A real Postgres, not a skip. tests/test_store_contract.py skips its
+    # Postgres cases when AGENTPIPE_DSN is unset, so a bare runner would pass
+    # green while never exercising the store that actually broke in production.
+    # This service is the whole reason CI is worth having here.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: agentpipe
+        ports:
+          - 5432:5432
+        # Do not run tests until the database can actually answer. Without this
+        # the schema load races the container's startup and fails intermittently,
+        # which is worse than failing every time.
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # Points at the service container above. This is the only variable that
+      # changes the suite's behaviour: with it set, the contract tests stop
+      # skipping and run against real Postgres. No OPENAI_API_KEY and no
+      # AGENTPIPE_PRICES here on purpose: no test calls a model, and the ones
+      # that need prices build their own fake map.
+      AGENTPIPE_DSN: postgresql://postgres:postgres@localhost:5432/agentpipe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Match the dev machine exactly. Testing on a different Python than you
+      # develop on is a divergence waiting to surface as "works on my machine".
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      # Load the base schema, then every migration in numeric order. ON_ERROR_STOP
+      # makes a bad SQL file fail the job loudly instead of continuing and letting
+      # the tests fail later with a confusing "column does not exist". A silent SQL
+      # error is exactly the kind of quiet failure this project exists to refuse.
+      - name: Load schema
+        run: |
+          psql "$AGENTPIPE_DSN" -v ON_ERROR_STOP=1 -f schema.sql
+          for m in migrations/*.sql; do
+            echo "applying $m"
+            psql "$AGENTPIPE_DSN" -v ON_ERROR_STOP=1 -f "$m"
+          done
+
+      - name: Test
+        run: pytest -q
