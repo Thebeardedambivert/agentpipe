@@ -18,8 +18,10 @@ and three books, not the library.
 
 from __future__ import annotations
 
+import math
 import re
 import subprocess
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -114,6 +116,25 @@ def _words(text: str) -> set[str]:
     return {w for w in _WORD.findall(text.lower()) if len(w) > 2}
 
 
+def _idf(paths: tuple[str, ...]) -> dict[str, float]:
+    """How much a word is worth as evidence.
+
+    A word appearing in most paths tells you nothing. In this repo "agentpipe"
+    is in almost every path, so matching it means nothing at all. A word in one
+    path is a strong signal.
+
+    This is the self-maintaining version of a stopword list. A blacklist of
+    boring words is always one word out of date and someone has to keep it.
+    Rarity computes itself from the repo in front of you.
+    """
+    n = len(paths) or 1
+    df: Counter[str] = Counter()
+    for p in paths:
+        for w in _words(p):
+            df[w] += 1
+    return {w: math.log(n / c) for w, c in df.items()}
+
+
 def select(
     ticket: Ticket,
     repo: Repo,
@@ -121,40 +142,54 @@ def select(
 ) -> tuple[Candidate, ...]:
     """Choose which files the pack pays for.
 
-    The ranking is deliberately stupid: exact hints from the ticket first, then
-    word overlap between the goal and the file path.
+    Two paths, and the first one is the important one.
 
-    Stupid because we have no evidence yet about what good looks like. Anything
-    cleverer here, embeddings, a model call to pick files, a similarity index,
-    would be a guess dressed as engineering, and it would cost tokens to make a
-    decision about saving tokens. When Layer 0's table says this ranking picks
-    badly, we will have a reason to improve it and a number to improve against.
+    If the ticket names files, those are the answer. Full stop. A human decided
+    already, and word overlap does not get a vote. The first version of this
+    function added its own picks on top of the ticket's, and on the first real
+    run it matched "repo" in the goal "the file exists at the repo root" against
+    repo.py and test_repo.py. Two irrelevant files, 67% of the pack, half the
+    cost of the call. The bug was not the matching. It was second-guessing a
+    human who already knew.
 
-    Until then: cheap, deterministic, and easy to delete.
+    Nothing is lost by trusting the ticket, because the pack still carries the
+    whole tree for about 39 tokens, and RULES tells the model to say so if it
+    needs a file it cannot see. Asking is cheaper than guessing.
+
+    Only when nobody has said anything does the word overlap run, and then it
+    weights matches by rarity so that common words carry little.
+
+    There is deliberately no minimum score. A floor was tried and removed: the
+    number would have been invented rather than measured, and on a small repo it
+    silently selected nothing at all. If the fallback path turns out to pick
+    junk, that will show up in the table as a pack that is bigger than it should
+    be, and the floor can be set from that number instead of from a hunch.
     """
-    available = set(repo.files())
-    scored: dict[str, Candidate] = {}
+    available = repo.files()
+    available_set = set(available)
 
-    # 1. The ticket said so. It wins. A human already made this decision and
-    #    they know more than a word-overlap score does.
-    for hint in ticket.files_hint:
-        if hint in available:
-            scored[hint] = Candidate(hint, 1000.0, "named in ticket")
+    hinted = [h for h in ticket.files_hint if h in available_set]
+    if hinted:
+        return tuple(
+            Candidate(h, 1000.0, "named in ticket") for h in hinted[:max_files]
+        )
 
-    # 2. Word overlap between the goal and the path.
+    idf = _idf(available)
     goal_words = _words(ticket.goal)
-    for path in available:
-        if path in scored:
-            continue
-        overlap = goal_words & _words(path)
-        if overlap:
-            scored[path] = Candidate(
-                path,
-                float(len(overlap)),
-                f"path matches: {', '.join(sorted(overlap))}",
-            )
+    scored: list[Candidate] = []
 
-    ranked = sorted(scored.values(), key=lambda c: (-c.score, c.path))
+    for path in available:
+        overlap = goal_words & _words(path)
+        if not overlap:
+            continue
+        score = sum(idf.get(w, 0.0) for w in overlap)
+        best = sorted(overlap, key=lambda w: -idf.get(w, 0.0))
+        scored.append(
+            Candidate(path, score, f"path matches: {', '.join(best)}")
+        )
+
+    # max_files is a ceiling, not a quota.
+    ranked = sorted(scored, key=lambda c: (-c.score, c.path))
     return tuple(ranked[:max_files])
 
 

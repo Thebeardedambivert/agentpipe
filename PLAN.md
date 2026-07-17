@@ -90,6 +90,36 @@ gives you two problems instead of one.
 *Prices come from a file and the code refuses to guess.* A confidently wrong cost
 dashboard is worse than no dashboard, because you will believe it.
 
+**Known gap: spans go nowhere.**
+
+`trace_id` and `span_id` write as all zeros. That is not a bug, it is OTel saying
+no tracer is configured. We installed the API, the code calls it correctly, and
+the default implementation throws every span away.
+
+The ledger is real. The trace is not. Cost data is in the table and trustworthy;
+the span columns look official and contain nothing.
+
+Deliberately deferred. Spans earn their keep when there is a tree of nested calls
+and the question becomes "which step inside this run was slow", not just "what
+did this run cost". At Layer 0 there is one call and no tree.
+
+Fix at Layer 3, when a run becomes builder then validate then retry, and cost
+needs a shape rather than a list. Wire an exporter then and the zeros become real.
+
+**Known gap: reasoning tokens are invisible.**
+
+`_extract_usage` reads `completion_tokens`, which includes reasoning tokens but
+does not separate them. Turn reasoning effort up and output climbs from 4 to 400
+with no way to tell thinking from answer.
+
+Matters because effort multiplies output tokens, and output is 6x the price of
+input. Any experiment comparing effort levels produces a number nobody can
+interpret without this.
+
+Fix: capture `completion_tokens_details.reasoning_tokens`, add a column, add a
+field to Usage. Ten minutes. Do it before running any effort comparison, not
+after.
+
 **Path:** E5 (agent memory in Postgres), P3 (cost and latency tracking, OTel
 semantic conventions), A1.5 (idempotency, safe retries).
 
@@ -299,4 +329,3 @@ serving, because the two produce different systems.
 Layer 1 cannot be written until we know what codebase this operates on. The
 validation commands are part of the ticket contract, and validation commands are
 specific to a repo. That answer unblocks everything after Layer 0.
-

@@ -46,6 +46,47 @@ later layer before its dependencies. In particular:
 Read PLAN.md before proposing work on any layer. Each layer's "decisions and
 why" section is binding, not commentary.
 
+## Lessons paid for
+
+Each of these cost a real run or a real bug. They are not style opinions.
+
+**Do not second-guess an explicit human decision.**
+The ticket's Files section is the answer, not a suggestion to improve on. The
+first selector added its own picks on top of the ticket's, matched "repo" in the
+goal "the file exists at the repo root" against repo.py and test_repo.py, and
+spent 67% of the pack on two irrelevant files. The bug was not the matching. It
+was arrogance. Where a human has stated a decision, implement it.
+
+Corollary: when withholding context from the model, check it has a way to ask.
+Trusting the hints is only safe because the pack carries the whole tree for ~39
+tokens and RULES tells the model to speak up rather than guess.
+
+**Do not invent tuned numbers.**
+A score floor of 1.0 was added with the comment "tuned by nothing" and shipped
+in the same breath. It silently selected zero files on a small repo. If a
+threshold, weight, or limit is not derived from something in `model_calls`, it
+is a guess wearing engineering clothes, and this project exists to argue against
+exactly that.
+
+Not a ban. Guessing is sometimes the only option. But then: say so in the name or
+the docstring, make it a parameter rather than a constant, and write down what
+number would settle it. A guess that admits it is a hypothesis. A guess that does
+not is a bug with good manners.
+
+**A ceiling is not a quota.**
+`max_files=5` means at most five, not find me five. The first version filled the
+slot with anything scoring above zero. Limits bound the worst case; they are not
+targets to reach.
+
+**Prefer removing the clever thing to tuning it.**
+The rarity weighting was sound. The threshold on top was not. When a fix has a
+defensible core and a speculative extra, ship the core and delete the extra. The
+extra can come back when there is a number demanding it.
+
+**A bug found in a real run gets a regression test naming the real run.**
+Not a generic test. One that says what happened, what it cost, and why the fix is
+shaped the way it is. See `test_hints_are_authoritative_not_advisory`.
+
 ## Testing
 
 `pytest -q`. 15 tests. They do not test whether OpenAI works, they test the three
