@@ -2,6 +2,11 @@
 
 Operating context for agentpipe. Constraints and decision rules only.
 
+**Read STATE.md before proposing any work.** It has where things actually stand,
+what is next, which decisions are already settled, and which known gaps are
+deliberate rather than oversights. This file is the rules, PLAN.md is the design,
+STATE.md is the situation.
+
 ## Stack
 
 Python 3.14, OpenAI SDK, OpenTelemetry, psycopg 3, Supabase Postgres, pytest.

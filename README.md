@@ -43,7 +43,7 @@ Three rules hold the whole design up:
 | 7 | Temporal wraps the loop | |
 
 Full reasoning for every layer, including each decision and why it was made:
-**[PLAN.md](./PLAN.md)**
+**[PLAN.md](./PLAN.md)**. Current state and what is next: **[STATE.md](./STATE.md)**.
 
 ## Layer 0
 
@@ -134,4 +134,3 @@ comes before any of it.
 ## License
 
 MIT
-
