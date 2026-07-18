@@ -60,14 +60,17 @@ have. Was not the fix it was sold as.
 
 ## Next, in order
 
-**1. A ticket that is not already done.**
-`tickets/TASK-1.md` now carries acceptance checks, so running it stops for free
-at the staleness gate instead of rewriting a correct file (see item 2). It is no
-longer a good demo of the pipeline doing work, because it correctly does none.
-The pipeline still has no real ticket of its own: something whose work does not
-already exist, that a real model has to implement and the loop has to validate.
-That is the first honest end-to-end run of Layer 3, and the natural place the real
-cache number finally gets measured on a realistic pack rather than a padded probe.
+**1. Proven end-to-end on real work. (Done, 18 July 2026.)**
+The pipeline ran a real ticket start to finish on `gpt-5.4-mini`: TASK-TRUNCATE,
+implement `truncate(text, length)` on a scratch repo. Result: PASSED in 1 attempt,
+the agent wrote correct code (it even added a `max(0, ...)` guard the spec did not
+ask for), validation gated it, independently re-confirmed. Real numbers: cost
+$0.000482, pack 384 tokens in / 43 out, a real trace (`13c1e7...`, dur 4445ms).
+Cache read 0%, as expected: 384 tokens is well under the ~1,024 threshold. Kept in
+`model_calls` as the second real datapoint after TASK-1. The retry path was not
+triggered live (the model got it first try); it stays proven by tests. Still open:
+a bigger, realistic ticket, which is where the cache would fire and a live retry
+could actually be watched.
 
 **2. The stale ticket hole. (Partially closed.)**
 Nothing used to ask "is this already true?", so the agent always did something.
