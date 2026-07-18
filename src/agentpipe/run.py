@@ -17,6 +17,7 @@ from agentpipe.checks import Verdict, assess
 from agentpipe.loop import report_loop, run_loop
 from agentpipe.patch import PatchError
 from agentpipe.repo import Repo, RepoError
+from agentpipe.review import ReviewError, report_review, run_review
 from agentpipe.telemetry import (
     MeteredClient,
     PostgresCallStore,
@@ -41,6 +42,11 @@ def main() -> int:
     ap.add_argument("--resume", default=None, metavar="RUN_ID",
                     help="resume a crashed loop by its run id "
                          "(printed when a loop starts)")
+    ap.add_argument("--review", action="store_true",
+                    help="after a successful run, have a reviewer read the "
+                         "written files and print findings. Opt-in: it adds a "
+                         "model call. Advisory only in this stage; the fixer "
+                         "that acts on findings is Layer 5 Stage 2.")
     args = ap.parse_args()
 
     # Make trace ids real for this run. No-op unless the SDK is present, and it
@@ -104,6 +110,9 @@ def main() -> int:
         )
         print(report_loop(loop_result))
         print()
+        if args.review and loop_result.ok:
+            written = tuple(sorted({p for r in loop_result.results for p in r.written}))
+            _review(args, ticket, repo, client, written)
         return 0 if loop_result.ok else 1
 
     try:
@@ -131,7 +140,38 @@ def main() -> int:
     print()
     print(report(result, repo, dry_run=not args.apply))
     print()
+    if args.review:
+        if args.apply and result.written:
+            _review(args, ticket, repo, client, result.written)
+        else:
+            # A dry run wrote nothing, so there is nothing on disk to review.
+            print("note: --review needs files on disk. Add --apply, or run the "
+                  "loop with --max-attempts > 1.\n")
     return 0
+
+
+def _review(args, ticket, repo, client, files) -> None:
+    """Run the reviewer on the files a successful run wrote, and print findings.
+
+    A ReviewError (the reviewer replied without the format, or said nothing) is
+    reported, not raised: the reviewer is advisory this stage, so its
+    misbehaviour must not turn a successful build into a failed command. The
+    build already landed; the review is a bonus opinion on top.
+    """
+    if not files:
+        print("note: nothing was written, so there is nothing to review.\n")
+        return
+    # Same base model as the build for now. Per-role routing (a cheaper reviewer
+    # or fixer) is Layer 5 Stage 2's models.json, not this stage.
+    try:
+        result = run_review(ticket, repo, client, args.model, files)
+    except ReviewError as exc:
+        print(f"review skipped: the reviewer's reply was unusable:\n  {exc}\n")
+        print("The call was still made and billed. Check model_calls "
+              "(role='reviewer').\n")
+        return
+    print(report_review(result))
+    print()
 
 
 if __name__ == "__main__":
