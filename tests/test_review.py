@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 
@@ -25,9 +26,35 @@ from agentpipe.review import (
 )
 from agentpipe.telemetry import InMemoryCallStore, MeteredClient, PriceMap
 from agentpipe.ticket import Ticket
-from tests.test_loop import SequencedFakeOpenAI
 
 PRICES = PriceMap({"fake": {"input": 1.0, "cached_input": 0.1, "output": 10.0}})
+
+
+class FakeOpenAI:
+    """Returns one canned reply. Self-contained on purpose: test files here do
+    not import each other's fakes, because a bare `pytest` (as CI runs it) has no
+    repo root on sys.path and `from tests.x import ...` fails at collection."""
+
+    def __init__(self, reply: str) -> None:
+        self.reply = reply
+
+    @property
+    def chat(self):
+        return SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+    def _create(self, **kwargs):
+        return SimpleNamespace(
+            model="fake",
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(content=self.reply),
+                finish_reason="stop",
+            )],
+            usage=SimpleNamespace(
+                prompt_tokens=1500,
+                completion_tokens=120,
+                prompt_tokens_details=SimpleNamespace(cached_tokens=0),
+            ),
+        )
 
 
 def findings_reply(*findings: dict) -> str:
@@ -36,10 +63,9 @@ def findings_reply(*findings: dict) -> str:
 
 
 def client_for(reply: str) -> MeteredClient:
-    fake = SequencedFakeOpenAI([reply])
     return MeteredClient(
         store=InMemoryCallStore(), prices=PRICES,
-        client=fake, run_id="review-run",  # type: ignore[arg-type]
+        client=FakeOpenAI(reply), run_id="review-run",  # type: ignore[arg-type]
     )
 
 
