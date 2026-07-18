@@ -1,13 +1,14 @@
 # STATE
 
-Where this actually is, as of 17 July 2026. Read after CLAUDE.md and PLAN.md.
+Where this actually is, as of 18 July 2026. Read after CLAUDE.md and PLAN.md.
 
 CLAUDE.md is the rules. PLAN.md is the design. This is the situation.
 
 ## Built
 
-Layers 0, 1, 2 and 3. 130 tests, all passing. CI (`.github/workflows/ci.yml`)
-runs them against a real Postgres on every push.
+Layers 0, 1, 2, 3, and Layer 5 Stage 1 (the reviewer). Reviewer adds 14 tests.
+CI (`.github/workflows/ci.yml`) runs the suite against a real Postgres on every
+push, and is green on the `layer5-reviewer` branch.
 
 ```
 telemetry.py   the seam. Every model call goes through MeteredClient.call()
@@ -18,7 +19,8 @@ pack.py        assembly, ordered by volatility so the cache prefix stays stable
 patch.py       parses the model's reply, refuses ambiguity, writes to disk
 builder.py     the wiring for one attempt. Ticket in, files out
 loop.py        the LangGraph loop: build, validate, retry, resume. Layer 3
-run.py         CLI. Dry run by default; --max-attempts runs the loop
+review.py      the reviewer: passing code in, ranked structured findings out
+run.py         CLI. Dry run by default; --max-attempts runs the loop, --review reviews
 preflight.py   four checks before you trust any number
 ```
 
@@ -90,14 +92,27 @@ Still open, and deliberately so:
 - Trust boundary: checks run with your privileges. Fine while you author your own
   tickets, needs a sandbox the day they come from anywhere you do not control.
 
-**3. Layer 3 is built. Next is Layer 5 or 6.**
+**3. Layer 3 is built. Layer 5 Stage 1 (the reviewer) is built. Next is Stage 2.**
 The loop, crash-safe resume, and the tracing tree are done; the cache claim is
-proven (92%, above the ~1,024-token threshold; see the baseline). Per PLAN.md the
-honest next steps are Layer 5 (reviewer and fixer, the biggest cost lever, via
-model routing) and Layer 6 (the eval gate before review). Layer 4 (event-sourced
-replay) and Layer 7 (Temporal) are the industrial layers: worth it at volume or
-for the learning, not before. `checks.py` already seeded the validation runner:
-the same check run before is the staleness gate, run after is the success check.
+proven (92%, above the ~1,024-token threshold; see the baseline).
+
+Layer 5 is staged (see `plans/layer5.md`): Stage 1 the reviewer, Stage 2 the
+fixer loop plus model routing, Stage 3 the audit table. Stage 1 landed on the
+`layer5-reviewer` branch. The reviewer reads passing code and returns ranked,
+structured findings (`--- findings` block of JSON, parsed strictly by us, refused
+when malformed). It is opt-in (`--review`) and advisory only this stage: it reads,
+nothing acts on its word yet, the same one-shot-before-loop discipline as Layer 2
+before Layer 3. Proven on a real run: it flagged deliberately thin `truncate` code
+(always appends ellipsis so it can exceed the max; no input guard) for $0.000737,
+recorded in `model_calls` as `role='reviewer'` (the first real reviewer datapoint,
+tagged TASK-REVIEW-DEMO). Still open, by design: no fixer, no revert guard, no
+model routing, no audit table yet. Those are Stages 2 and 3.
+
+Per PLAN.md the fixer (Stage 2) is the biggest cost lever, via model routing, and
+Layer 6 (the eval gate before review) follows. Layer 4 (event-sourced replay) and
+Layer 7 (Temporal) are the industrial layers: worth it at volume or for the
+learning, not before. `checks.py` already seeded the validation runner: the same
+check run before is the staleness gate, run after is the success check.
 
 ## Decisions already made, so nobody relitigates them
 
