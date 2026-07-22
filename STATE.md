@@ -6,7 +6,7 @@ CLAUDE.md is the rules. PLAN.md is the design. This is the situation.
 
 ## Built
 
-Layers 0, 1, 2, 3, and Layer 5 Stages 1 and 2 (reviewer and fixer loop). 159
+Layers 0, 1, 2, 3, and Layer 5 complete (reviewer, fixer loop, audit table). 177
 tests, all passing under the bare `pytest` CI runs. CI (`.github/workflows/ci.yml`)
 runs the suite against a real Postgres on every push.
 
@@ -22,6 +22,7 @@ loop.py        the LangGraph loop: build, validate, retry, resume. Layer 3
 review.py      the reviewer: passing code in, ranked structured findings out
 fixer.py       the fixer loop: fix the worst finding, revalidate, revert if broken
 config.py      ModelMap: which model each role uses, defaults to the base model
+findings.py    the audit port: record findings and outcomes to review_findings
 run.py         CLI. --max-attempts runs the loop, --review reviews, --fix repairs
 preflight.py   four checks before you trust any number
 ```
@@ -97,7 +98,7 @@ Still open, and deliberately so:
 - Trust boundary: checks run with your privileges. Fine while you author your own
   tickets, needs a sandbox the day they come from anywhere you do not control.
 
-**3. Layer 3 and Layer 5 Stages 1 and 2 are built. Next is Stage 3.**
+**3. Layer 3 and Layer 5 (all three stages) are built. Next is Layer 6.**
 The loop, crash-safe resume, and the tracing tree are done; the cache claim is
 proven (92%, above the ~1,024-token threshold; see the baseline).
 
@@ -120,10 +121,20 @@ stayed green, outcome `fixed`, $0.000310 for the fix, recorded as `role='fixer'`
 cheaper `gpt-5.4-nano`, the fix was correct code but the model twice omitted the
 `--- end` terminator, so the strict parser refused it and marked it `unfixable`,
 leaving the code untouched (TASK-FIX-DEMO, TASK-FIX-MINI). The cheapest model is
-not automatically the right fixer: routing trades cost against format reliability,
-which is exactly what Stage 3's table will measure. The revert guard is proven
-byte-for-byte by test, not yet watched live (a real model rarely writes a breaking
-fix on demand). Still open, by design: no audit table yet. That is Stage 3.
+not automatically the right fixer: routing trades cost against format reliability.
+The revert guard is proven byte-for-byte by test, not yet watched live (a real
+model rarely writes a breaking fix on demand).
+
+Stage 3 (audit table, `review_findings`) records both the fix loop's outcomes and
+advisory `--review` findings. `findings.py` is a `FindingStore` port (InMemory +
+Postgres, contract-tested like `CallStore`); recording swallows its own errors so
+the audit can never fail a run. Two views: `finding_outcomes` (severity x outcome)
+and `fixer_reliability` (fixed/reverted/unfixable per fixer model). Proven on real
+runs: nano `unfixable`, mini `fixed`, one advisory `reported` (TASK-S3-NANO/MINI/
+REV), and `fixer_reliability` then read mini 100% / nano 0% fix rate straight from
+the table. That is the routing question answered from data instead of anecdote, the
+whole point of the layer. The cost-vs-reliability line for the fixer model is now
+measurable; it is not yet a large enough sample to set a default from.
 
 Per PLAN.md, Layer 6 (the eval gate before review) follows Layer 5. Layer 4
 (event-sourced replay) and Layer 7 (Temporal) are the industrial layers: worth it

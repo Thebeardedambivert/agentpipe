@@ -282,24 +282,37 @@ Recording findings and outcomes to a `review_findings` table, and the views that
 answer "is the reviewer worth its cost". Stage 2 returns outcomes in memory and
 prints them; persistence is the measurement stage.
 
-## Stage 3: the audit table
+## Stage 3: the audit table (built)
 
-The instrumentation that answers the six open questions instead of hoping.
+The instrumentation that answers the open questions instead of hoping. Records both
+the fix loop's outcomes and advisory `--review` findings (agreed with the user).
 
 - Migration `migrations/003_review_findings.sql`: table `review_findings`
   (`run_id`, `task_ref`, `round`, `severity`, `file`, `line`, `issue`, `outcome`,
-  `created_at`) plus a view summarizing findings by severity and outcome.
-- The review path records each finding and its outcome. Recording is append-only
-  audit, not a replay cache, so it does not need the `CallStore` idempotency
-  contract, but it is tagged and tested against the live DB the same careful way
-  (nothing writes to the measurement tables except real work, and diagnostics clean
-  up after themselves).
-- With `model_calls` (per-role cost, already recorded) plus `review_findings`, the
-  table answers: does the reviewer find useful things (findings vs `fixed`
-  outcomes); does the cheap fixer work (`fixed` vs `reverted` per fixer model); how
-  many rounds and which severities; is a wrong review degrading code (`reverted`
-  count, caught by the guard); oscillation (findings recurring across rounds); cost
-  (the review-fix stretch in `model_calls`).
+  `model`, `call_key`, `created_at`). `outcome` is one of `reported` (an advisory
+  review finding), `fixed`/`reverted`/`unfixable` (the fix loop). `model` is the
+  model responsible (reviewer for `reported`, fixer otherwise), so grouping by it
+  answers the routing question. `call_key` is a soft link to the responsible
+  `model_calls` row, not a foreign key (model_calls has none and telemetry is
+  best-effort). Append-only, no unique index: a log, not a cache. Plus two views:
+  `finding_outcomes` (severity x outcome counts) and `fixer_reliability` (fixed vs
+  reverted vs unfixable per fixer model, with a `fix_rate_pct`).
+- `findings.py`: `FindingStore` is a port (abstract + `InMemoryFindingStore` +
+  `PostgresFindingStore`), contract-tested against both in
+  `tests/test_finding_store_contract.py`, the same guardrail as `CallStore`. A
+  `FindingRow` validates severity/outcome at construction (unrepresentable invalid
+  state). `record_review_findings` / `record_fix_findings` turn a returned
+  `ReviewResult` / `ReviewFixResult` into rows, deriving run_id, model, and call_key
+  off the already-recorded call, so the loops stay database-free. Recording swallows
+  its own errors (`_safe`): the audit can never fail a run.
+- The CLI records after `_review` / `_review_fix`, best-effort.
+- Proven on real runs: nano fix `unfixable`, mini fix `fixed`, one advisory
+  `reported`. `fixer_reliability` then read mini 100% / nano 0% fix rate straight
+  from the table. The routing question, answered from data.
+- With `model_calls` (per-role cost) plus `review_findings`, the tables answer: does
+  the reviewer find useful things (findings vs `fixed`); does the cheap fixer work
+  (`fixer_reliability`); which severities survive; is a wrong review degrading code
+  (`reverted`, caught by the guard); cost (join on `call_key`).
 
 ## What to expect, honestly
 
