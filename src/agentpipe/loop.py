@@ -37,6 +37,13 @@ from opentelemetry import trace as otel_trace
 
 from agentpipe.builder import BuildResult, run_builder
 from agentpipe.checks import CheckResult, Outcome, Verdict, assess, run_checks
+from agentpipe.judge import (
+    CriterionOutcome,
+    JudgeError,
+    JudgeResult,
+    JudgeVerdict,
+    run_judge,
+)
 from agentpipe.patch import PatchError, apply_edits, parse_edits
 from agentpipe.repo import Repo
 from agentpipe.telemetry import CallRecord, MeteredClient
@@ -61,12 +68,21 @@ class LoopState(TypedDict):
     model: str
     max_attempts: int
     feedback_max_chars: int
+    # The eval gate (Layer 6 Stage 2). Off by default: with gate=False the loop
+    # behaves exactly as Layer 3 built it. On, the judge gets a second say after
+    # tests pass, and a BLOCK is fed back to the builder like a test failure,
+    # bounded by the same max_attempts.
+    gate: bool
+    judge_model: str
     # Mutable across attempts.
     attempt: int
     feedback: Optional[str]
     build_error: Optional[str]
     # results accumulates: each build appends one, so operator.add not replace.
     results: Annotated[list[BuildResult], operator.add]
+    # judges accumulates one per gated attempt, so the run's total cost is honest
+    # and the last verdict is reportable.
+    judges: Annotated[list[JudgeResult], operator.add]
     verdict: str  # "" | pass | retry | exhausted | blocked
     validation: tuple[CheckResult, ...]
     acceptance_warning: Optional[str]
@@ -81,14 +97,25 @@ class LoopResult:
     results: tuple[BuildResult, ...]
     validation: tuple[CheckResult, ...]
     acceptance_warning: Optional[str] = None
+    judges: tuple[JudgeResult, ...] = ()  # one per gated attempt, when gating is on
 
     @property
     def ok(self) -> bool:
         return self.verdict == "pass"
 
     @property
+    def judge(self) -> Optional[JudgeResult]:
+        """The last judge verdict, or None if the run was not gated."""
+        return self.judges[-1] if self.judges else None
+
+    @property
     def total_cost_usd(self) -> Decimal:
-        return sum((r.cost_usd for r in self.results), Decimal(0))
+        # Include the judge's calls: with gating on they are a real part of the
+        # run's bill, and hiding them would be the quiet-cost trap this project
+        # exists to refuse.
+        build = sum((r.cost_usd for r in self.results), Decimal(0))
+        judge = sum((j.cost_usd for j in self.judges), Decimal(0))
+        return build + judge
 
 
 def _build_node(state: LoopState) -> dict[str, Any]:
@@ -133,11 +160,56 @@ def _validate_node(state: LoopState) -> dict[str, Any]:
         return {"verdict": "blocked", "validation": results}
 
     if all(r.outcome is Outcome.PASS for r in results):
-        return {"verdict": "pass", "validation": results,
-                "acceptance_warning": _acceptance_disagreement(state["ticket"], state["repo"])}
+        if not state["gate"]:
+            return {"verdict": "pass", "validation": results,
+                    "acceptance_warning": _acceptance_disagreement(state["ticket"], state["repo"])}
+        # Tests pass. When gating, the judge gets the second say: it can send a
+        # wrong-but-passing patch back to the builder.
+        return _gate(state, results)
 
     feedback = _combine_output(results, state["feedback_max_chars"])
     return _decide_fail(state, feedback, results)
+
+
+def _gate(state: LoopState, results: tuple[CheckResult, ...]) -> dict[str, Any]:
+    """The eval gate. Judge the passing code; a BLOCK retries with its reasons.
+
+    Fail open: if the judge itself cannot produce a verdict (a malformed reply),
+    the code passes without it. A broken sensor must not block otherwise-passing
+    work, the same principle as the meter never failing a run. The judge is not yet
+    measured (that is Stage 3), so it gets to stop and retry, never to fail the run
+    on its own malfunction.
+    """
+    written = state["results"][-1].written if state["results"] else ()
+    try:
+        judge = run_judge(
+            state["ticket"], state["repo"], state["client"],
+            state["judge_model"], written,
+        )
+    except JudgeError as exc:
+        return {"verdict": "pass", "validation": results,
+                "acceptance_warning": f"gate skipped: the judge's reply was unusable ({exc})"}
+
+    if judge.verdict is JudgeVerdict.BLOCK:
+        out = _decide_fail(state, _judge_feedback(judge), results)
+        out["judges"] = [judge]
+        return out
+
+    # PASS or UNGUARDED: a real pass, with the judge recorded for cost and report.
+    return {"verdict": "pass", "validation": results, "judges": [judge],
+            "acceptance_warning": _acceptance_disagreement(state["ticket"], state["repo"])}
+
+
+def _judge_feedback(judge: JudgeResult) -> str:
+    """Turn a BLOCK into feedback the builder can act on: the criteria it missed."""
+    lines = [
+        "Your tests passed, but the code was judged against the ticket's acceptance "
+        "criteria and these are not yet met. Fix them:",
+    ]
+    for v in judge.verdicts:
+        if v.outcome is not CriterionOutcome.SATISFIED:
+            lines.append(f"- {v.criterion} ({v.outcome.value}): {v.reason}")
+    return "\n".join(lines)
 
 
 def _decide_fail(
@@ -208,6 +280,8 @@ def run_loop(
     max_attempts: int = 3,
     feedback_max_chars: int = FEEDBACK_MAX_CHARS,
     resume: bool = False,
+    gate: bool = False,
+    judge_model: Optional[str] = None,
 ) -> LoopResult:
     """Run the build/validate/retry loop until it passes, gives up, or breaks.
 
@@ -217,6 +291,12 @@ def run_loop(
     `resume` continues a crashed run: the caller builds `client` with the run_id
     it wants to continue, and the loop recovers where that run got to (see
     `_resume`) rather than starting over.
+
+    `gate` turns on the Layer 6 eval gate: after tests pass, the judge grades the
+    ticket's semantic acceptance criteria, and a BLOCK is fed back to the builder
+    like a test failure, bounded by the same max_attempts. `judge_model` chooses the
+    judge's model (defaults to `model`). Off by default, so the loop is unchanged
+    for every existing caller. Resume does not re-judge; the gate is for fresh runs.
     """
     start_attempt = 1
     feedback: Optional[str] = None
@@ -235,10 +315,13 @@ def run_loop(
         "model": model,
         "max_attempts": max_attempts,
         "feedback_max_chars": feedback_max_chars,
+        "gate": gate,
+        "judge_model": judge_model or model,
         "attempt": start_attempt,
         "feedback": feedback,
         "build_error": None,
         "results": [],
+        "judges": [],
         "verdict": "",
         "validation": (),
         "acceptance_warning": None,
@@ -260,6 +343,7 @@ def run_loop(
         results=tuple(final["results"]),
         validation=final["validation"],
         acceptance_warning=final.get("acceptance_warning"),
+        judges=tuple(final.get("judges", [])),
     )
 
 
@@ -342,6 +426,16 @@ def report_loop(result: LoopResult) -> str:
                 lines.append(f"  [{r.outcome.value}] {r.command}")
                 if r.output:
                     lines.append("    " + r.output.replace("\n", "\n    "))
+
+    # The gate's verdict, when the run was gated. On a BLOCK (whether the loop went
+    # on to pass or exhausted) show which criteria it kept flagging.
+    if result.judge is not None:
+        j = result.judge
+        lines += ["", f"judge      {j.verdict.value.upper()}   ${j.cost_usd}"]
+        if j.verdict is not JudgeVerdict.PASS:
+            for v in j.verdicts:
+                if v.outcome is not CriterionOutcome.SATISFIED:
+                    lines.append(f"  [{v.outcome.value}] {v.criterion}: {v.reason}")
 
     if result.acceptance_warning:
         lines += ["", f"WARNING: {result.acceptance_warning}"]

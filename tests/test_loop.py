@@ -13,6 +13,7 @@ they behave the same on the Windows dev machine and Linux CI.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import uuid
 from decimal import Decimal
@@ -20,6 +21,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from agentpipe.judge import JudgeVerdict
 from agentpipe.loop import run_loop
 from agentpipe.repo import Repo
 from agentpipe.telemetry import (
@@ -301,3 +303,83 @@ def test_a_run_is_one_trace_with_real_ids(repo):
     assert len(trace_ids) == 1  # both attempts belong to the same trace
     (tid,) = trace_ids
     assert set(tid) != {"0"}  # and it is a real id, not all zeros
+
+
+# --- the eval gate: the judge as a second gate after tests pass -----------
+
+# answer.txt exists, whatever it holds: validation passes on any content, so the
+# judge (not validation) is what distinguishes right from wrong content.
+VALIDATE_EXISTS = (
+    'python -c "import os, sys; sys.exit(0 if os.path.exists(\'answer.txt\') else 1)"'
+)
+
+
+def _verdict(*entries: dict) -> str:
+    return "--- verdict\n" + json.dumps(list(entries)) + "\n--- end"
+
+
+# The ticket's one acceptance bullet (no inline check) is a semantic criterion, so
+# the judge grades criterion 0.
+JUDGE_PASS = _verdict({"criterion": 0, "outcome": "satisfied", "reason": "right content"})
+JUDGE_BLOCK = _verdict({"criterion": 0, "outcome": "not_satisfied", "reason": "wrong content"})
+JUDGE_PROSE = "I think this is fine, ship it."
+
+
+def test_gate_blocks_a_wrong_but_passing_patch_then_passes(repo):
+    """The heart of Layer 6 Stage 2: tests pass on attempt 1 but the judge blocks,
+    so the builder tries again, and the second patch clears the judge."""
+    # build 7 -> tests pass -> judge blocks -> build 42 -> tests pass -> judge passes
+    client, fake = client_for([PATCH_7, JUDGE_BLOCK, PATCH_42, JUDGE_PASS])
+    r = run_loop(_ticket(VALIDATE_EXISTS), repo, client, "fake",
+                 max_attempts=3, gate=True)
+    assert r.verdict == "pass"
+    assert r.attempts == 2
+    assert len(r.judges) == 2
+    assert r.judge.verdict is JudgeVerdict.PASS
+    assert repo.read("answer.txt").strip() == "42"
+
+
+def test_gate_off_never_judges(repo):
+    """Default behaviour is unchanged: no gate, no judge calls, no judges recorded."""
+    client, fake = client_for([PATCH_7])  # 7 is 'wrong' but the gate is off
+    r = run_loop(_ticket(VALIDATE_EXISTS), repo, client, "fake", max_attempts=3)
+    assert r.verdict == "pass"
+    assert r.judges == ()
+    assert fake.calls == 1  # one build, and crucially no judge call
+
+
+def test_gate_exhausts_when_the_judge_keeps_blocking(repo):
+    """A judge that never clears is bounded by max_attempts, not an infinite loop."""
+    client, fake = client_for([PATCH_7, JUDGE_BLOCK, PATCH_42, JUDGE_BLOCK])
+    r = run_loop(_ticket(VALIDATE_EXISTS), repo, client, "fake",
+                 max_attempts=2, gate=True)
+    assert r.verdict == "exhausted"
+    assert r.attempts == 2
+    assert len(r.judges) == 2
+    assert r.judge.verdict is JudgeVerdict.BLOCK
+
+
+def test_gate_fails_open_when_the_judge_reply_is_unusable(repo):
+    """A broken judge must not block otherwise-passing work: it passes, with a note,
+    and records no verdict."""
+    client, fake = client_for([PATCH_42, JUDGE_PROSE])
+    r = run_loop(_ticket(VALIDATE_EXISTS), repo, client, "fake",
+                 max_attempts=3, gate=True)
+    assert r.verdict == "pass"
+    assert r.judge is None                     # nothing was recorded
+    assert "gate skipped" in (r.acceptance_warning or "")
+
+
+def test_gate_is_unguarded_and_free_when_no_semantic_criteria(repo):
+    """A ticket whose acceptance is machine-checked has nothing for the judge to
+    grade: UNGUARDED, and no judge model call is made."""
+    check = (
+        'python -c "import sys; sys.exit(0 if open(\'answer.txt\').read().strip() '
+        "== '42' else 1)\""
+    )
+    client, fake = client_for([PATCH_42])  # no judge reply needed; none is requested
+    r = run_loop(_ticket(VALIDATE_EXISTS, check=check), repo, client, "fake",
+                 max_attempts=3, gate=True)
+    assert r.verdict == "pass"
+    assert r.judge.verdict is JudgeVerdict.UNGUARDED
+    assert fake.calls == 1  # one build, no judge call

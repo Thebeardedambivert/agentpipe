@@ -7,8 +7,9 @@ CLAUDE.md is the rules. PLAN.md is the design. This is the situation.
 ## Built
 
 Layers 0, 1, 2, 3, Layer 5 complete (reviewer, fixer loop, audit table), and Layer 6
-Stage 1 (the judge). 191 tests, all passing under the bare `pytest` CI runs. CI
-(`.github/workflows/ci.yml`) runs the suite against a real Postgres on every push.
+Stages 1 and 2 (the judge, and the judge as a gate). 196 tests, all passing under
+the bare `pytest` CI runs. CI (`.github/workflows/ci.yml`) runs the suite against a
+real Postgres on every push.
 
 ```
 telemetry.py   the seam. Every model call goes through MeteredClient.call()
@@ -24,7 +25,8 @@ fixer.py       the fixer loop: fix the worst finding, revalidate, revert if brok
 config.py      ModelMap: which model each role uses, defaults to the base model
 findings.py    the audit port: record findings and outcomes to review_findings
 judge.py       the eval gate: grade check-less acceptance criteria, three-state
-run.py         CLI. --max-attempts loops, --review reviews, --fix repairs, --judge judges
+loop.py (gate) --gate makes the judge a second gate in the loop, blocks rebuild
+run.py         CLI. --max-attempts loops, --review, --fix, --judge, --gate
 preflight.py   four checks before you trust any number
 ```
 
@@ -99,9 +101,10 @@ Still open, and deliberately so:
 - Trust boundary: checks run with your privileges. Fine while you author your own
   tickets, needs a sandbox the day they come from anywhere you do not control.
 
-**3. Layer 5 is complete and Layer 6 Stage 1 (the judge) is built. Next is Layer 6
-Stage 2.** The loop, crash-safe resume, and the tracing tree are done; the cache
-claim is proven (92%, above the ~1,024-token threshold; see the baseline).
+**3. Layer 5 is complete and Layer 6 Stages 1 and 2 (judge, then judge-as-gate) are
+built. Next is Layer 6 Stage 3 (the eval dataset).** The loop, crash-safe resume,
+and the tracing tree are done; the cache claim is proven (92%, above the
+~1,024-token threshold; see the baseline).
 
 Layer 5 is staged (see `plans/layer5.md`): Stage 1 the reviewer, Stage 2 the
 fixer loop plus model routing, Stage 3 the audit table.
@@ -147,9 +150,25 @@ and makes no model call. Proven on real runs: thin `truncate` passes its test bu
 the judge returned BLOCK, catching that a negative length is not rejected
 (TASK-JUDGE-THIN, $0.000591); robust code PASSED (TASK-JUDGE-ROBUST); an
 all-machine-checked ticket was UNGUARDED with no call. Cost lands under `role=judge`
-in `ratio_by_role`. Still open, by design: it prints, it does not gate. Stage 2 is
-the gate (BLOCK stops the run before the expensive review-fix stretch); Stage 3 is
-the eval dataset that measures the judge's own accuracy.
+in `ratio_by_role`.
+
+Layer 6 Stage 2 (the gate, on the `layer6-gate` branch) wires the judge into the
+loop, opt-in via `--gate`. After tests pass the judge grades the semantic criteria,
+and a BLOCK feeds its reasons back to the builder like a test failure, so the loop
+rebuilds until the judge passes or `max_attempts` is spent. This is the user's call
+(Option B, judge drives the builder) chosen over "stop and report" with the full
+downside in view. Guardrails, so responsible-B not naive-B: one attempt cap bounds
+the rebuilds (no infinite loop, no unbounded spend); opt-in; the judge cost is
+folded into the run total so it cannot hide; and it **fails open**, a judge whose
+own reply is unusable passes the code with a note rather than blocking, because a
+broken sensor must not stop the machine and the judge is not yet measured. A second
+documented deviation from PLAN.md's order: it hands an unmeasured judge command
+authority, which Stage 3 is what makes safe. Proven end to end on a real run:
+builder -> tests pass -> real judge PASS, total cost including the judge (TASK-GATE).
+The block-then-rebuild cycle is proven deterministically by test; a real model kept
+writing correct code first try, so it was not watched live (same honesty as Stage
+2's revert guard). Still open, by design: Stage 3 is the eval dataset that measures
+whether the judge, now driving the builder, is actually right.
 
 Layer 4 (event-sourced replay) and Layer 7 (Temporal) are the industrial layers:
 worth it at volume or for the learning, not before. `checks.py` already seeded the
