@@ -14,6 +14,8 @@ import sys
 
 from agentpipe.builder import report, run_builder
 from agentpipe.checks import Verdict, assess
+from agentpipe.config import ModelMap
+from agentpipe.fixer import report_review_fix, run_review_fix
 from agentpipe.loop import report_loop, run_loop
 from agentpipe.patch import PatchError
 from agentpipe.repo import Repo, RepoError
@@ -45,8 +47,15 @@ def main() -> int:
     ap.add_argument("--review", action="store_true",
                     help="after a successful run, have a reviewer read the "
                          "written files and print findings. Opt-in: it adds a "
-                         "model call. Advisory only in this stage; the fixer "
-                         "that acts on findings is Layer 5 Stage 2.")
+                         "model call. Advisory only; --fix acts on the findings.")
+    ap.add_argument("--fix", action="store_true",
+                    help="after a successful run, review the written files and "
+                         "repair findings one at a time, reverting any fix that "
+                         "breaks validation. Opt-in: it adds model calls and "
+                         "writes to the tree. Layer 5 Stage 2.")
+    ap.add_argument("--models", default=None, metavar="PATH",
+                    help="JSON file of role -> model overrides for --fix (or set "
+                         "AGENTPIPE_MODELS). Unset means every role uses --model.")
     args = ap.parse_args()
 
     # Make trace ids real for this run. No-op unless the SDK is present, and it
@@ -110,9 +119,12 @@ def main() -> int:
         )
         print(report_loop(loop_result))
         print()
-        if args.review and loop_result.ok:
+        if loop_result.ok and (args.review or args.fix):
             written = tuple(sorted({p for r in loop_result.results for p in r.written}))
-            _review(args, ticket, repo, client, written)
+            if args.review:
+                _review(args, ticket, repo, client, written)
+            if args.fix:
+                _review_fix(args, ticket, repo, client, written)
         return 0 if loop_result.ok else 1
 
     try:
@@ -140,13 +152,16 @@ def main() -> int:
     print()
     print(report(result, repo, dry_run=not args.apply))
     print()
-    if args.review:
+    if args.review or args.fix:
         if args.apply and result.written:
-            _review(args, ticket, repo, client, result.written)
+            if args.review:
+                _review(args, ticket, repo, client, result.written)
+            if args.fix:
+                _review_fix(args, ticket, repo, client, result.written)
         else:
-            # A dry run wrote nothing, so there is nothing on disk to review.
-            print("note: --review needs files on disk. Add --apply, or run the "
-                  "loop with --max-attempts > 1.\n")
+            # A dry run wrote nothing, so there is nothing on disk to work on.
+            print("note: --review/--fix need files on disk. Add --apply, or run "
+                  "the loop with --max-attempts > 1.\n")
     return 0
 
 
@@ -171,6 +186,22 @@ def _review(args, ticket, repo, client, files) -> None:
               "(role='reviewer').\n")
         return
     print(report_review(result))
+    print()
+
+
+def _review_fix(args, ticket, repo, client, files) -> None:
+    """Review the written files and repair findings one at a time.
+
+    Writes to the tree (the fixer edits real files), so it runs only after a
+    successful build/loop that already wrote them. Model routing comes from
+    --models (or AGENTPIPE_MODELS); unset means every role uses --model.
+    """
+    if not files:
+        print("note: nothing was written, so there is nothing to fix.\n")
+        return
+    models = ModelMap.from_env(base=args.model, path=args.models)
+    result = run_review_fix(ticket, repo, client, models, files)
+    print(report_review_fix(result))
     print()
 
 

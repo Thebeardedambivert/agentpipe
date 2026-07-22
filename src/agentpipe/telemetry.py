@@ -401,18 +401,36 @@ def idempotency_key(
     attempt_kind: AttemptKind,
     attempt_index: int,
     pack: str,
+    model: str,
 ) -> str:
     """Identity of a logical call.
 
-    Deliberately excludes run_id. Two runs of the same task, at the same
-    attempt index, with a byte-identical pack, are the same call, and the second
-    one should cost nothing. That is the whole point.
+    The key must contain everything that determines the output, because a replay
+    hands back a past output under this key and calls it the answer. Anything that
+    changes the answer but is missing from the key makes two different calls
+    collide, and the second silently gets the first's reply.
 
-    Include pack_hash and you get the property you want for free: if the context
-    changed, it is genuinely a different call and should be paid for. If it did
-    not change, re-running is waste.
+    Deliberately excludes run_id. Two runs of the same task, at the same attempt
+    index, with a byte-identical pack, on the same model, are the same call, and
+    the second one should cost nothing. That is the whole point.
+
+    Includes pack, so a changed context is genuinely new work and is paid for.
+
+    Includes model. This was missing until Layer 5 Stage 2 made model routing a
+    first-class, per-role choice: routing the fixer nano->mini, then re-running an
+    identical pack, replayed nano's reply instead of calling mini, because the
+    model was not in the key. A different model is a different computation at a
+    different price, so it is a different call. Excluding it was a latent
+    silent-wrong-answer bug that only became reachable once the model could vary
+    while the pack stayed fixed. See test_a_model_change_is_not_replayed.
+
+    Known remaining gap, stated rather than hidden: request parameters that also
+    shape the output (temperature, reasoning effort, max_completion_tokens) are
+    still not in the key. They are effectively constant in this project today, so
+    the risk is small, but it is the same class of bug as the model one was. When
+    any of them becomes a variable a run sweeps over, it belongs in here too.
     """
-    raw = f"{task_ref}|{role}|{attempt_kind}|{attempt_index}|{pack}"
+    raw = f"{task_ref}|{role}|{attempt_kind}|{attempt_index}|{model}|{pack}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -449,7 +467,7 @@ class MeteredClient:
     ) -> CallRecord:
         pack = pack_hash(messages)
         key = idempotency_key(
-            task_ref or "adhoc", role, attempt_kind, attempt_index, pack
+            task_ref or "adhoc", role, attempt_kind, attempt_index, pack, model
         )
 
         # A1.5, made concrete. The crash we are defending against is: the API
