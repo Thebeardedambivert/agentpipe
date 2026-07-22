@@ -6,9 +6,9 @@ CLAUDE.md is the rules. PLAN.md is the design. This is the situation.
 
 ## Built
 
-Layers 0, 1, 2, 3, and Layer 5 complete (reviewer, fixer loop, audit table). 177
-tests, all passing under the bare `pytest` CI runs. CI (`.github/workflows/ci.yml`)
-runs the suite against a real Postgres on every push.
+Layers 0, 1, 2, 3, Layer 5 complete (reviewer, fixer loop, audit table), and Layer 6
+Stage 1 (the judge). 191 tests, all passing under the bare `pytest` CI runs. CI
+(`.github/workflows/ci.yml`) runs the suite against a real Postgres on every push.
 
 ```
 telemetry.py   the seam. Every model call goes through MeteredClient.call()
@@ -23,7 +23,8 @@ review.py      the reviewer: passing code in, ranked structured findings out
 fixer.py       the fixer loop: fix the worst finding, revalidate, revert if broken
 config.py      ModelMap: which model each role uses, defaults to the base model
 findings.py    the audit port: record findings and outcomes to review_findings
-run.py         CLI. --max-attempts runs the loop, --review reviews, --fix repairs
+judge.py       the eval gate: grade check-less acceptance criteria, three-state
+run.py         CLI. --max-attempts loops, --review reviews, --fix repairs, --judge judges
 preflight.py   four checks before you trust any number
 ```
 
@@ -98,9 +99,9 @@ Still open, and deliberately so:
 - Trust boundary: checks run with your privileges. Fine while you author your own
   tickets, needs a sandbox the day they come from anywhere you do not control.
 
-**3. Layer 3 and Layer 5 (all three stages) are built. Next is Layer 6.**
-The loop, crash-safe resume, and the tracing tree are done; the cache claim is
-proven (92%, above the ~1,024-token threshold; see the baseline).
+**3. Layer 5 is complete and Layer 6 Stage 1 (the judge) is built. Next is Layer 6
+Stage 2.** The loop, crash-safe resume, and the tracing tree are done; the cache
+claim is proven (92%, above the ~1,024-token threshold; see the baseline).
 
 Layer 5 is staged (see `plans/layer5.md`): Stage 1 the reviewer, Stage 2 the
 fixer loop plus model routing, Stage 3 the audit table.
@@ -136,11 +137,24 @@ the table. That is the routing question answered from data instead of anecdote, 
 whole point of the layer. The cost-vs-reliability line for the fixer model is now
 measurable; it is not yet a large enough sample to set a default from.
 
-Per PLAN.md, Layer 6 (the eval gate before review) follows Layer 5. Layer 4
-(event-sourced replay) and Layer 7 (Temporal) are the industrial layers: worth it
-at volume or for the learning, not before. `checks.py` already seeded the
-validation runner: the same
-check run before is the staleness gate, run after is the success check.
+Layer 6 Stage 1 (judge, on the `layer6-judge` branch; see `plans/layer6.md`) grades
+the ticket's check-less acceptance criteria, the semantic ones no exit code can
+verify. Per-criterion three-state verdict (satisfied / not_satisfied / uncertain),
+PASS only if all satisfied, a deliberate documented deviation from PLAN.md's "score
+below threshold" (a threshold is a tuned-by-nothing number; PLAN.md now says so).
+Opt-in (`--judge`), advisory this stage. A ticket with no such criteria is UNGUARDED
+and makes no model call. Proven on real runs: thin `truncate` passes its test but
+the judge returned BLOCK, catching that a negative length is not rejected
+(TASK-JUDGE-THIN, $0.000591); robust code PASSED (TASK-JUDGE-ROBUST); an
+all-machine-checked ticket was UNGUARDED with no call. Cost lands under `role=judge`
+in `ratio_by_role`. Still open, by design: it prints, it does not gate. Stage 2 is
+the gate (BLOCK stops the run before the expensive review-fix stretch); Stage 3 is
+the eval dataset that measures the judge's own accuracy.
+
+Layer 4 (event-sourced replay) and Layer 7 (Temporal) are the industrial layers:
+worth it at volume or for the learning, not before. `checks.py` already seeded the
+validation runner: the same check run before is the staleness gate, run after is the
+success check.
 
 ## Decisions already made, so nobody relitigates them
 

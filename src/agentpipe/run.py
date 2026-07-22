@@ -21,6 +21,7 @@ from agentpipe.findings import (
     record_review_findings,
 )
 from agentpipe.fixer import report_review_fix, run_review_fix
+from agentpipe.judge import JudgeError, report_judge, run_judge
 from agentpipe.loop import report_loop, run_loop
 from agentpipe.patch import PatchError
 from agentpipe.repo import Repo, RepoError
@@ -58,6 +59,11 @@ def main() -> int:
                          "repair findings one at a time, reverting any fix that "
                          "breaks validation. Opt-in: it adds model calls and "
                          "writes to the tree. Layer 5 Stage 2.")
+    ap.add_argument("--judge", action="store_true",
+                    help="after a successful run, judge the written files against "
+                         "the ticket's acceptance criteria that no command can "
+                         "check. Opt-in: it adds a model call. Advisory only; the "
+                         "gate that acts on the verdict is Layer 6 Stage 2.")
     ap.add_argument("--models", default=None, metavar="PATH",
                     help="JSON file of role -> model overrides for --fix (or set "
                          "AGENTPIPE_MODELS). Unset means every role uses --model.")
@@ -128,8 +134,10 @@ def main() -> int:
         )
         print(report_loop(loop_result))
         print()
-        if loop_result.ok and (args.review or args.fix):
+        if loop_result.ok and (args.review or args.fix or args.judge):
             written = tuple(sorted({p for r in loop_result.results for p in r.written}))
+            if args.judge:
+                _judge(args, ticket, repo, client, written)
             if args.review:
                 _review(args, ticket, repo, client, written, finding_store)
             if args.fix:
@@ -161,17 +169,41 @@ def main() -> int:
     print()
     print(report(result, repo, dry_run=not args.apply))
     print()
-    if args.review or args.fix:
+    if args.review or args.fix or args.judge:
         if args.apply and result.written:
+            if args.judge:
+                _judge(args, ticket, repo, client, result.written)
             if args.review:
                 _review(args, ticket, repo, client, result.written, finding_store)
             if args.fix:
                 _review_fix(args, ticket, repo, client, result.written, finding_store)
         else:
             # A dry run wrote nothing, so there is nothing on disk to work on.
-            print("note: --review/--fix need files on disk. Add --apply, or run "
-                  "the loop with --max-attempts > 1.\n")
+            print("note: --review/--fix/--judge need files on disk. Add --apply, or "
+                  "run the loop with --max-attempts > 1.\n")
     return 0
+
+
+def _judge(args, ticket, repo, client, files) -> None:
+    """Judge the written files against the ticket's check-less acceptance criteria.
+
+    Advisory this stage: it prints a verdict, it does not gate. A JudgeError (the
+    judge replied without the format, or incompletely) is reported, not raised, for
+    the same reason as the reviewer: an advisory judge must not fail a successful
+    build. A ticket with no such criteria is UNGUARDED and costs nothing.
+    """
+    if not files:
+        print("note: nothing was written, so there is nothing to judge.\n")
+        return
+    try:
+        result = run_judge(ticket, repo, client, args.model, files)
+    except JudgeError as exc:
+        print(f"judge skipped: the judge's reply was unusable:\n  {exc}\n")
+        print("The call was still made and billed. Check model_calls "
+              "(role='judge').\n")
+        return
+    print(report_judge(result))
+    print()
 
 
 def _review(args, ticket, repo, client, files, finding_store) -> None:
