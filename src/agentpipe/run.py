@@ -15,6 +15,11 @@ import sys
 from agentpipe.builder import report, run_builder
 from agentpipe.checks import Verdict, assess
 from agentpipe.config import ModelMap
+from agentpipe.findings import (
+    PostgresFindingStore,
+    record_fix_findings,
+    record_review_findings,
+)
 from agentpipe.fixer import report_review_fix, run_review_fix
 from agentpipe.loop import report_loop, run_loop
 from agentpipe.patch import PatchError
@@ -103,6 +108,10 @@ def main() -> int:
 
     client = MeteredClient(store=PostgresCallStore(), prices=PriceMap.from_env(),
                            run_id=args.resume)
+    # The audit store for Layer 5 findings. Recording is best-effort and swallows
+    # its own errors, so building it eagerly is fine even when --review/--fix are
+    # off: it is only ever written by _review/_review_fix.
+    finding_store = PostgresFindingStore()
 
     if args.max_attempts > 1:
         # The loop writes on every attempt, because validation runs against real
@@ -122,9 +131,9 @@ def main() -> int:
         if loop_result.ok and (args.review or args.fix):
             written = tuple(sorted({p for r in loop_result.results for p in r.written}))
             if args.review:
-                _review(args, ticket, repo, client, written)
+                _review(args, ticket, repo, client, written, finding_store)
             if args.fix:
-                _review_fix(args, ticket, repo, client, written)
+                _review_fix(args, ticket, repo, client, written, finding_store)
         return 0 if loop_result.ok else 1
 
     try:
@@ -155,9 +164,9 @@ def main() -> int:
     if args.review or args.fix:
         if args.apply and result.written:
             if args.review:
-                _review(args, ticket, repo, client, result.written)
+                _review(args, ticket, repo, client, result.written, finding_store)
             if args.fix:
-                _review_fix(args, ticket, repo, client, result.written)
+                _review_fix(args, ticket, repo, client, result.written, finding_store)
         else:
             # A dry run wrote nothing, so there is nothing on disk to work on.
             print("note: --review/--fix need files on disk. Add --apply, or run "
@@ -165,7 +174,7 @@ def main() -> int:
     return 0
 
 
-def _review(args, ticket, repo, client, files) -> None:
+def _review(args, ticket, repo, client, files, finding_store) -> None:
     """Run the reviewer on the files a successful run wrote, and print findings.
 
     A ReviewError (the reviewer replied without the format, or said nothing) is
@@ -176,8 +185,6 @@ def _review(args, ticket, repo, client, files) -> None:
     if not files:
         print("note: nothing was written, so there is nothing to review.\n")
         return
-    # Same base model as the build for now. Per-role routing (a cheaper reviewer
-    # or fixer) is Layer 5 Stage 2's models.json, not this stage.
     try:
         result = run_review(ticket, repo, client, args.model, files)
     except ReviewError as exc:
@@ -187,9 +194,11 @@ def _review(args, ticket, repo, client, files) -> None:
         return
     print(report_review(result))
     print()
+    # Advisory findings land as outcome='reported'. Recording is best-effort.
+    record_review_findings(finding_store, result)
 
 
-def _review_fix(args, ticket, repo, client, files) -> None:
+def _review_fix(args, ticket, repo, client, files, finding_store) -> None:
     """Review the written files and repair findings one at a time.
 
     Writes to the tree (the fixer edits real files), so it runs only after a
@@ -203,6 +212,8 @@ def _review_fix(args, ticket, repo, client, files) -> None:
     result = run_review_fix(ticket, repo, client, models, files)
     print(report_review_fix(result))
     print()
+    # Each round's finding and outcome land in review_findings. Best-effort.
+    record_fix_findings(finding_store, result)
 
 
 if __name__ == "__main__":
