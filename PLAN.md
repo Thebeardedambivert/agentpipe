@@ -285,6 +285,15 @@ the pipeline. One judge call that kills all ten is the best ratio in the system.
 validation catches "it does not run" and the judge catches "it runs and it is
 wrong," which no test suite you did not write can catch.
 
+*A per-criterion verdict, not a score below a threshold (revised at build time).*
+This section originally said the judge scores the patch and the gate trips below a
+threshold. A threshold is exactly the "tuned by nothing" number CLAUDE.md forbids,
+and this wording predates that lesson. Layer 6 instead grades the ticket's
+check-less acceptance criteria one by one, three-state (satisfied / not_satisfied /
+uncertain), and passes only if all are satisfied. It honors the intent here (stop
+bad work before the expensive stretch) without inventing a cutoff, and it says
+which criterion failed and why, which a single score hides. See plans/layer6.md.
+
 **Path:** P2 (evals as CI/CD gates, LLM-as-a-judge, harness sensors). The path
 frames evals as quality. Here they are also the cheapest cost control you have.
 
