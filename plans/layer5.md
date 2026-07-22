@@ -32,6 +32,21 @@ table, not from hope.
   and friendly for other users, not a code change. Arrives with the fixer (Stage 2),
   where a cheap model actually earns its keep.
 - **Fork 4:** after a fix, always re-validate; re-review up to a hard round cap.
+- **Fork 5:** a fix that breaks validation is reverted with an *in-memory content
+  snapshot*, not git. Before the fixer runs, the allowed files' current contents
+  are read into memory and the set of pre-existing paths is noted; on a breaking
+  fix, the captured contents are rewritten and any newly-created file is deleted.
+  No git-state assumption, testable without subprocesses, matches how patch.py
+  already writes whole files. Its one limitation is written into the code: the
+  snapshot lives in memory, so it does not survive a crash mid-fix. That is
+  deliberate, because crash-durability is Layer 7's job, not this stage's, and a
+  half-built durability story in the wrong layer is worse than an honest gap.
+- **Fork 6:** one finding per round, worst first, not a batch. Each round repairs
+  the single most severe actionable finding, re-validates, keeps or reverts, then
+  re-reviews from the real updated code. Isolates damage (a broken fix reverts only
+  itself), lets the loop see findings that interact (fixing one can dissolve or
+  reveal another), and gives Stage 3 clean per-finding outcomes. Costs more calls
+  than a batch, bounded by the round cap and offset by routing the fixer cheap.
 - **Review is opt-in** (`--review`), off by default, because it adds cost.
 - **Plain loop, not LangGraph.** The control flow (review, filter, fix, revalidate,
   cap) is simple; a graph would be ceremony. Layer 3 already taught LangGraph; the
@@ -158,26 +173,114 @@ Cases:
 - CI stays green (real Postgres). No schema change this stage, so nothing new for
   CI to exercise beyond the reviewer's recorded call.
 
-## Stage 2: the fixer loop, and model routing
+## Stage 2: the fixer loop, and model routing (this stage)
 
-Consume Stage 1's findings and act on them, safely.
+Consume Stage 1's findings and act on them, safely. The safety spine: every fix is
+re-validated, and a fix that breaks the tests is reverted, so the cycle can only
+improve working code or leave it untouched, never degrade it.
 
-- `ModelMap` (in `config.py` or beside `PriceMap`), mirroring `PriceMap.from_env`
-  but **defaulting** instead of refusing: unset roles fall back to the run's base
-  model, so it works out of the box. `models.json` shape:
-  `{ "builder": "gpt-5.4-mini", "reviewer": "gpt-5.4-mini", "fixer": "gpt-5.4-nano" }`.
-  Defaulting a model is safe (unlike a wrong price), so this is the one config that
-  may default. `models.json` is gitignored like `prices.json`.
-- `FIX_RULES`: stable system prompt asking for the `--- file` / `--- end` patch
-  format the builder already uses, given only the findings and the current code,
-  never history (Idea 2, at the place the studied pipeline went quadratic).
-- `run_review_fix(...)`, a plain loop: review, filter at `min_severity`, snapshot
-  the allowed files, fix, `apply_edits` (allowed = `ticket.files_hint`), re-validate.
-  If validation no longer passes, revert to the snapshot and mark the findings
-  `reverted (broke tests)`: a fix that breaks the build is discarded, so the cycle
-  can never leave working code worse. Otherwise mark `fixed`. Repeat up to
-  `max_rounds`. Malformed reviewer output is refused and retried inside the loop.
-- `max_rounds` is a hypothesis, a parameter with a docstring naming what settles it.
+### Model routing: `ModelMap` and `models.json`
+
+`ModelMap`, in a new `config.py`, mirroring `PriceMap.from_env` but **defaulting**
+instead of refusing: it takes a base model and returns the model for a role,
+falling back to the base when a role is unset, so it works out of the box.
+
+```
+models.json:  { "reviewer": "gpt-5.4-mini", "fixer": "gpt-5.4-nano" }
+```
+
+Loaded from `AGENTPIPE_MODELS` when set, otherwise every role is the base model.
+Defaulting a model is safe (a wrong price silently mis-bills; a wrong-but-present
+model just runs), so this is the one config allowed to default, unlike `PriceMap`
+which refuses. `models.json` is gitignored like `prices.json`. This is the I4 cost
+lever: the fixer does narrow work and does not need the pricier model.
+
+### `FIX_RULES` and the fixer pack
+
+`FIX_RULES`: a stable system prompt (cache-friendly, never interpolated) asking for
+the `--- file` / `--- end` patch format the builder already uses, so the fixer's
+reply parses through the existing `parse_edits`/`apply_edits` with no new parser.
+The fix pack carries only the one finding being fixed and the current contents of
+the allowed files. Never past attempts, never the review history: rebuild not
+accumulate, at the exact place the studied pipeline went quadratic.
+
+### The loop: `run_review_fix`
+
+`run_review_fix(ticket, repo, client, models, files, max_rounds, min_severity)`,
+a plain loop (no LangGraph), one finding per round:
+
+1. **Review** the current code via Stage 1's `run_review` (reviewer model from the
+   map). Malformed reviewer output is refused by `parse_findings`; the loop catches
+   `ReviewError` and retries the review up to a small cap, then stops if it will not
+   parse.
+2. **Pick** the single worst finding at or above `min_severity`. None -> clean,
+   stop.
+3. **Snapshot**: read the current contents of the allowed files into memory and
+   record which paths already exist (so a created file can be deleted on revert).
+4. **Fix**: `client.call(fix_pack(finding, code), model=models.for_role("fixer"),
+   role="fixer", attempt_kind="review_fix", attempt_index=round)`, then
+   `parse_edits` and `apply_edits(allowed=ticket.files_hint or None)`.
+5. **Re-validate** with `run_checks(ticket.validation, repo.root)`.
+   - If it still passes: mark the finding `fixed`, keep the change, continue.
+   - If it now fails or errors: **revert** from the snapshot (rewrite captured
+     contents, delete any newly-created file), mark the finding
+     `reverted (broke validation)`, and continue to the next round so one bad fix
+     does not end the run. The reverted round still cost a call; that is recorded.
+   - A fixer reply that will not parse (`PatchError`) is marked `unfixable
+     (bad patch)` and skipped, not retried forever.
+6. Repeat until clean, out of actionable findings, or `max_rounds` reached.
+
+`ReviewFixResult`: rounds run, each round's finding and its outcome
+(`fixed`/`reverted`/`unfixable`), the per-round validation, and total cost across
+every review and fix call. Plus `report_review_fix` for a human summary.
+
+`max_rounds` and `min_severity` are hypotheses, parameters with docstrings naming
+what would settle them, not tuned constants. `min_severity` defaults to `medium`
+for the fixer (acting on every `low` nitpick costs money and churns the diff for
+little gain), a labelled guess that Stage 3's table settles by showing which
+severities' fixes actually survive.
+
+### CLI (`run.py`)
+
+Add `--fix` (implies review, then the fix loop) and `--models <path>` (or
+`AGENTPIPE_MODELS`). `--review` stays advisory (Stage 1). After a successful loop,
+`--fix` runs `run_review_fix` on the written files and prints `report_review_fix`.
+Opt-in, because it adds cost and writes to the tree.
+
+### Tests (`tests/test_review_fix.py`)
+
+Self-contained fakes (each test file owns its fake, the lesson from Stage 1's CI
+break). A fake that returns a scripted sequence of reviewer and fixer replies keyed
+by role, so review and fix can be driven independently. Cases:
+
+- a finding, a good fix, validation still passes -> outcome `fixed`, code changed.
+- a fix that breaks validation -> `reverted`, and the file on disk is byte-for-byte
+  the pre-fix content (the revert guard, the heart of the stage).
+- a fix that *creates* a file then breaks validation -> the created file is deleted
+  on revert (the in-memory-snapshot edge case).
+- clean review (`[]`) -> no fix attempted, stop.
+- only sub-threshold findings -> nothing acted on, stop.
+- the round cap is respected (a finding that never clears stops at `max_rounds`).
+- a malformed reviewer reply -> refused, retried, then a clean stop.
+- an unparseable fixer reply -> `unfixable`, skipped, loop continues.
+- the fixer call uses the fixer model from the map (`role="fixer"`,
+  `attempt_kind="review_fix"`), so routing and Stage 3 attribution are real.
+
+### Verification
+
+- `pytest -q` green including `tests/test_review_fix.py`, run with the bare
+  `pytest` console script (as CI does), not only `python -m pytest`.
+- A real run: thin `truncate` code, `--fix`, watch the reviewer flag the ellipsis
+  bug, the fixer repair it, validation stay green, and the outcome read `fixed`,
+  with the fixer call recorded under `role='fixer'` at the cheaper model. Then a
+  deliberately unfixable case to watch a revert leave the code untouched.
+- CI stays green (real Postgres). No schema change this stage; that is Stage 3.
+
+### Deferred to Stage 3
+
+Recording findings and outcomes to a `review_findings` table, and the views that
+answer "is the reviewer worth its cost". Stage 2 returns outcomes in memory and
+prints them; persistence is the measurement stage.
 
 ## Stage 3: the audit table
 
