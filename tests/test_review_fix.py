@@ -262,3 +262,59 @@ def test_the_fixer_runs_on_the_routed_model_and_is_recorded(repo):
     assert rec.role == "fixer"
     assert rec.attempt_kind == "review_fix"
     assert rec.model == "fix-m"
+
+
+# --- multi-file fixes: one fix touching several files ----------------------
+
+VALIDATE_BOTH_42 = (
+    'python -c "import sys; sys.exit(0 if \'42\' in open(\'a.txt\').read() '
+    "and '42' in open('b.txt').read() else 1)\""
+)
+
+
+def patch_files(**files: str) -> str:
+    """A fixer reply that rewrites several files at once."""
+    return "\n".join(f"--- {name}\n{content}\n--- end" for name, content in files.items())
+
+
+def high_multi(issue: str = "a.txt and b.txt disagree") -> dict:
+    return {"severity": "high", "file": "a.txt", "line": 1, "issue": issue}
+
+
+@pytest.fixture
+def repo_multi(tmp_path):
+    def _make(files: dict) -> Repo:
+        for name, content in files.items():
+            (tmp_path / name).write_text(content, encoding="utf-8", newline="\n")
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+        return Repo(tmp_path)
+    return _make
+
+
+MULTI = ("a.txt", "b.txt")
+
+
+def test_a_multi_file_fix_is_kept(repo_multi):
+    """One round's fix rewrites both files; validation still passes, so both stay."""
+    r = repo_multi({"a.txt": "42", "b.txt": "42"})
+    fixes = [patch_files(**{"a.txt": "42 done", "b.txt": "42 done"})]
+    client, fake, models = make([review(high_multi()), review()], fixes)
+    result = run_review_fix(_ticket(VALIDATE_BOTH_42), r, client, models, MULTI,
+                            max_rounds=3)
+    assert [rd.outcome for rd in result.rounds] == ["fixed"]
+    assert r.read("a.txt").strip() == "42 done"
+    assert r.read("b.txt").strip() == "42 done"
+
+
+def test_a_breaking_multi_file_fix_reverts_every_file(repo_multi):
+    """The fix edits both files and drops '42' from b.txt, so validation fails and
+    BOTH files are restored byte for byte, not just the one the finding named."""
+    r = repo_multi({"a.txt": "42 alpha", "b.txt": "42 beta"})
+    fixes = [patch_files(**{"a.txt": "42 changed", "b.txt": "no number"})]
+    client, fake, models = make([review(high_multi())], fixes)
+    result = run_review_fix(_ticket(VALIDATE_BOTH_42), r, client, models, MULTI,
+                            max_rounds=3)
+    assert [rd.outcome for rd in result.rounds] == ["reverted"]
+    assert r.read("a.txt") == "42 alpha"   # restored even though its own edit was fine
+    assert r.read("b.txt") == "42 beta"    # restored, the one that broke it
