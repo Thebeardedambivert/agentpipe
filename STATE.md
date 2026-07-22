@@ -213,7 +213,7 @@ That conversation should happen.
 
 ## The shape of every bug so far
 
-Four real bugs, all the same one: **the system reported success while quietly not
+Five real bugs, all the same one: **the system reported success while quietly not
 doing the thing.**
 
 - pytest reported 95 passing from a test file in the wrong folder
@@ -223,6 +223,10 @@ doing the thing.**
   cache hit
 - the contract tests wrote fixture rows into the live table and ratio_by_role
   averaged them in
+- the idempotency key excluded the model, so routing the fixer nano->mini and
+  re-running an identical pack replayed nano's answer instead of calling mini, and
+  reported it as mini's (Stage 2 made it reachable; fixed by putting model in the
+  key). A wrong model comparison that would have looked right.
 
 None errored. All lied. This is why the meter exists, and it is why Andrew's
 70,000 sat there unnoticed: nothing was broken, it just cost money.

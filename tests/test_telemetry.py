@@ -125,9 +125,33 @@ def test_attempt_index_separates_calls():
 
 def test_idempotency_key_ignores_run_id():
     """Two runs, same logical call, same key. This is the point."""
-    a = idempotency_key("TASK-1", "builder", "implement", 1, "abc")
-    b = idempotency_key("TASK-1", "builder", "implement", 1, "abc")
+    a = idempotency_key("TASK-1", "builder", "implement", 1, "abc", "test-model")
+    b = idempotency_key("TASK-1", "builder", "implement", 1, "abc", "test-model")
     assert a == b
+
+
+def test_a_model_change_is_not_replayed():
+    """A different model is a different call, not a free replay.
+
+    Regression for a bug found on a real run: Layer 5 Stage 2 routed the fixer
+    from gpt-5.4-nano to gpt-5.4-mini and re-ran an identical pack. The seam
+    replayed nano's reply instead of calling mini, because the model was not in
+    the idempotency key. A different model is a different computation at a
+    different price; excluding it let two different calls collide and the second
+    silently got the first's answer. The key now includes the model.
+    """
+    same = ("TASK-1", "builder", "implement", 1, "abc")
+    assert idempotency_key(*same, "gpt-5.4-nano") != idempotency_key(*same, "gpt-5.4-mini")
+
+    # And the seam honours it: same pack, different model, two real calls.
+    fake = FakeOpenAI()
+    store = InMemoryCallStore()
+    client = make(fake, store)
+    client.call(messages=MESSAGES, model="nano", role="fixer",
+                attempt_kind="review_fix", attempt_index=1, task_ref="TASK-1")
+    client.call(messages=MESSAGES, model="mini", role="fixer",
+                attempt_kind="review_fix", attempt_index=1, task_ref="TASK-1")
+    assert fake.calls == 2, "the model change was wrongly served from the cache"
 
 
 def test_pack_hash_is_order_stable():
