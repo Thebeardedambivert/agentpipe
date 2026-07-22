@@ -62,8 +62,14 @@ def main() -> int:
     ap.add_argument("--judge", action="store_true",
                     help="after a successful run, judge the written files against "
                          "the ticket's acceptance criteria that no command can "
-                         "check. Opt-in: it adds a model call. Advisory only; the "
-                         "gate that acts on the verdict is Layer 6 Stage 2.")
+                         "check. Opt-in: it adds a model call. Advisory only; use "
+                         "--gate to act on the verdict.")
+    ap.add_argument("--gate", action="store_true",
+                    help="run the loop with the judge as a gate: after tests pass "
+                         "the judge grades the semantic acceptance criteria, and a "
+                         "BLOCK is fed back to the builder to try again, bounded by "
+                         "--max-attempts. Needs --max-attempts > 1 for retries. "
+                         "Layer 6 Stage 2.")
     ap.add_argument("--models", default=None, metavar="PATH",
                     help="JSON file of role -> model overrides for --fix (or set "
                          "AGENTPIPE_MODELS). Unset means every role uses --model.")
@@ -119,7 +125,7 @@ def main() -> int:
     # off: it is only ever written by _review/_review_fix.
     finding_store = PostgresFindingStore()
 
-    if args.max_attempts > 1:
+    if args.max_attempts > 1 or args.gate:
         # The loop writes on every attempt, because validation runs against real
         # files. Writing is a decision, so it is opt-in via --max-attempts and
         # announced rather than silent.
@@ -128,9 +134,14 @@ def main() -> int:
               f"working tree on each one.")
         # Print the run id so a crash can be resumed with --resume.
         print(f"run id: {client.run_id}  (resume with --resume {client.run_id})\n")
+        judge_model = ModelMap.from_env(base=args.model, path=args.models).for_role("judge")
+        if args.gate and args.max_attempts == 1:
+            print("note: --gate has no retry budget at --max-attempts 1; a BLOCK "
+                  "will stop the run without rebuilding.\n")
         loop_result = run_loop(
             ticket, repo, client, args.model,
             max_attempts=args.max_attempts, resume=bool(args.resume),
+            gate=args.gate, judge_model=judge_model,
         )
         print(report_loop(loop_result))
         print()

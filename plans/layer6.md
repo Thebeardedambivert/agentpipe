@@ -37,12 +37,44 @@ Layer 0, so cost tracks by role for free.
 
 - **Stage 1: the judge, standalone, advisory (built).** Grade the loop's output,
   structured three-state verdict, `--judge`, printed not acted on.
-- **Stage 2: the gate.** Run the judge before the review/fix stretch; a BLOCK stops
-  the run, or feeds the judge's reasons back to the builder as a retry, so the
-  expensive stretch never runs on a wrong-but-passing patch.
+- **Stage 2: the gate (built).** After tests pass, the judge grades the semantic
+  criteria, and a BLOCK feeds its reasons back to the builder like a test failure,
+  so the loop rebuilds until the judge is satisfied or the attempt budget is spent.
 - **Stage 3: the eval dataset.** A small set of labelled real patches (satisfied /
   not) to measure the judge's own accuracy, so the gate is not itself lying. The
-  "who judges the judge" piece, and the P2 eval-dataset exercise.
+  "who judges the judge" piece, and the P2 eval-dataset exercise. Doubly needed now
+  that Stage 2 lets the judge drive the builder.
+
+## Stage 2 (built)
+
+The judge becomes a gate inside the loop (`loop.py`), opt-in via `--gate`.
+
+- **On BLOCK, loop back to the builder (the user's call, Option B).** A blocked
+  patch is fed the judge's failed criteria as feedback and rebuilt, exactly like a
+  test failure, until the judge passes or `max_attempts` is spent. The user chose
+  this over the safer "stop and report" with the full downside in view. The
+  guardrails that make it responsible: one attempt cap bounds the rebuilds (no
+  infinite loop, no unbounded spend); it is opt-in; the judge's cost is folded into
+  the run total so it cannot hide; and it **fails open**, a judge whose own reply is
+  unusable passes the code with a note rather than blocking it, because a broken
+  sensor must not stop the machine and the judge is not yet measured (Stage 3).
+- **Another documented deviation from PLAN.md's order.** PLAN.md wants the judge to
+  drive the builder, which this does, but the honest caveat is that we are handing
+  an unmeasured judge command authority before Stage 3 measures it. The guardrails
+  above bound the risk; Stage 3 is what removes it.
+- `loop.py`: `gate` and `judge_model` in `LoopState`/`run_loop` (both default off /
+  base model, so every existing caller is unchanged). `_gate` runs the judge after
+  tests pass; BLOCK routes through `_decide_fail` with `_judge_feedback`; the
+  accumulated `judges` make the total cost honest and the last verdict reportable.
+- `run.py`: `--gate` (forces the loop path so it works at any `--max-attempts`, with
+  a note when there is no retry budget). The judge model comes from `ModelMap`, so
+  `models.json` can route the judge cheap too.
+- Tests (in `test_loop.py`): block-then-pass, gate-off-never-judges, exhaust on a
+  persistent block (bounded, not infinite), fail-open on a broken judge, and
+  unguarded-and-free. Proven end to end on a real run: builder -> tests pass -> real
+  judge PASS, cost including the judge (TASK-GATE). The block-then-rebuild cycle is
+  proven deterministically by test; a real model kept writing correct code first
+  try, so it was not watched live (same honesty as Stage 2's revert guard).
 
 ## Stage 1 (built)
 
