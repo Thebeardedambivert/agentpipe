@@ -105,6 +105,13 @@ anyway) and the false-block bait (correct code whose only error path is an impli
 instrument that has never disagreed with its calibration has not been calibrated.
 The dataset's next job is to acquire a case the judge gets wrong.
 
+**A second, found by self-review before it could bite.** `run_judge` raised
+`JudgeError` after the call had been made and billed, and the exception carried no
+record, so an unusable reply was reported as a free sample. That makes the most
+expensive failure the harness can have (spends money, returns nothing, and in
+production silently disables the gate) look like the cheapest. `JudgeError` now
+carries its `CallRecord`, and the harness counts the cost.
+
 **A bug the stage found in itself.** The first `--repeat 5` run reported $0.024944.
 Only $0.019923 was billed: sample 0 of every case replayed from the previous run,
 and `cost_usd` on a replayed record carries the original price. The report now

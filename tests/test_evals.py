@@ -274,6 +274,13 @@ def test_an_unusable_reply_is_counted_not_swallowed(case_dir):
     assert not run.cases[0].verdict_agrees
     assert "fail open" in report_evals(run)
 
+    # And it is not free. The reply was unusable; the call was still billed. An
+    # exception that drops the record makes an unusable judge look like a cheap
+    # one, which is the wrong way round: it is the failure that spends money and
+    # returns nothing.
+    assert run.cases[0].cost_usd > 0
+    assert run.billed_cost_usd > 0
+
 
 def test_the_report_never_prints_a_percentage(case_dir):
     """Counts, not rates. At this size a percentage is a story, not a measurement."""

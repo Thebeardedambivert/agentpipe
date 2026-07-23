@@ -544,11 +544,19 @@ def run_evals(
                         task_ref=f"{TASK_REF_PREFIX}{case.name}",
                     )
                 except JudgeError as exc:
+                    # The verdict is lost but the call was still billed, so the
+                    # cost comes off the record the error carries. Reporting $0
+                    # here would make an unusable judge look like a free one, and
+                    # a judge that is unusable often is both the most expensive
+                    # and the most invisible failure this harness can have.
+                    rec = exc.record
                     case_scores.append(CaseScore(
                         case_name=case.name, provenance=case.provenance,
                         sample=sample, expected_verdict=case.expected_verdict,
-                        actual_verdict=None, criteria=(), cost_usd=Decimal(0),
+                        actual_verdict=None, criteria=(),
+                        cost_usd=rec.cost_usd if rec else Decimal(0),
                         error=str(exc),
+                        replayed=bool(rec and rec.status == "replayed"),
                     ))
                     continue
                 case_scores.append(score_case(case, result, sample, model))

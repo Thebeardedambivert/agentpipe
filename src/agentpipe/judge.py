@@ -97,7 +97,19 @@ _VERDICT_BLOCK = re.compile(
 
 
 class JudgeError(Exception):
-    """The judge's reply could not be turned into a verdict we trust."""
+    """The judge's reply could not be turned into a verdict we trust.
+
+    Carries the call that produced it, when there was one. The reply was unusable
+    but the call was still made and still billed, and an exception that drops that
+    fact makes the spend invisible to every caller that catches it. The eval
+    harness reports it as cost; run.py tells the human to go and look. Optional
+    because a JudgeError can also be raised by parse_verdict alone, on text that
+    never came from a call.
+    """
+
+    def __init__(self, message: str, record: Optional[CallRecord] = None) -> None:
+        super().__init__(message)
+        self.record = record
 
 
 @dataclass(frozen=True)
@@ -276,7 +288,12 @@ def run_judge(
         attempt_index=attempt_index,
         task_ref=task_ref or ticket.ref,
     )
-    verdicts = parse_verdict(record.content, criteria)
+    try:
+        verdicts = parse_verdict(record.content, criteria)
+    except JudgeError as exc:
+        # Re-raise carrying the call, so whoever catches this can still account for
+        # what it cost. The verdict is lost; the money is not.
+        raise JudgeError(str(exc), record=record) from exc
     verdict = (
         JudgeVerdict.PASS
         if all(v.outcome is CriterionOutcome.SATISFIED for v in verdicts)
