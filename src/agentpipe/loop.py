@@ -388,11 +388,18 @@ def _reapply_recorded_reply(prior: CallRecord, ticket: Ticket, repo: Repo) -> No
     redo it. Idempotent: if the work already landed, this rewrites identical
     bytes. An attempt whose reply was not applicable (the model returned prose)
     has nothing to recover, and that is fine; the loop rebuilds from real state.
+
+    That tolerance now covers a second case, and it is why this is a `try` rather
+    than a bare call. Replies recorded before the search/replace change are in the
+    old whole-file format, which the parser refuses outright. Those runs lose the
+    free re-apply and fall back to rebuilding from the repo, which is exactly what
+    this function does when it cannot recover anything. Old rows degrade; nothing
+    crashes.
     """
     if prior.status not in ("ok", "replayed") or not prior.content:
         return
     try:
-        edits = parse_edits(prior.content)
+        edits = parse_edits(prior.content, repo)
         apply_edits(repo, edits, allowed=ticket.files_hint or None, dry_run=False)
     except PatchError:
         return

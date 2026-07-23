@@ -82,7 +82,12 @@ def client_for(reply: str) -> tuple[MeteredClient, FakeOpenAI]:
     )
 
 
-GOOD = "--- README.md\n# readme\n\nThis project does a thing.\n--- end"
+GOOD = (
+    "--- README.md\n"
+    "<<<<<<< SEARCH\n# readme\n=======\n# readme\n\nThis project does a thing.\n"
+    ">>>>>>> REPLACE\n"
+    "--- end"
+)
 
 
 def test_dry_run_is_the_default(ticket, repo):
@@ -113,7 +118,9 @@ def test_pack_hash_is_recorded_against_the_call(ticket, repo):
 
 def test_files_outside_the_ticket_are_refused(ticket, repo):
     """The ticket named README.md. The model touched something else."""
-    client, _ = client_for("--- notes.md\nsneaky\n--- end")
+    client, _ = client_for(
+        "--- notes.md\n<<<<<<< SEARCH\n# notes\n=======\nsneaky\n>>>>>>> REPLACE\n--- end"
+    )
     with pytest.raises(PatchError, match="not in the agreed file set"):
         run_builder(ticket, repo, client, "fake", dry_run=False)
 

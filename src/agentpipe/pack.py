@@ -45,9 +45,21 @@ Rules:
 - Your claim that the work is done is not evidence. The validation commands
   decide. Write code that passes them.
 
-Reply with the complete new contents of each file you change, in this format:
+Send only the text you are changing, never a whole file. For each change, quote the exact text to find and what to put there instead:
 
 --- path/to/file.py
+<<<<<<< SEARCH
+the exact existing text, copied character for character
+=======
+what it should say instead
+>>>>>>> REPLACE
+--- end
+
+The SEARCH text must match the file exactly, including indentation, and must appear only once. If it appears more than once, include surrounding lines until it is unique. Use several SEARCH/REPLACE pairs for several changes, and several blocks for several files.
+
+To create a file that does not exist yet, and only then, send its full contents:
+
+--- path/to/new_file.py NEW
 <the full file contents>
 --- end
 

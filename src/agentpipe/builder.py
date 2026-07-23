@@ -28,23 +28,26 @@ from agentpipe.telemetry import CallRecord, MeteredClient
 from agentpipe.ticket import Ticket
 
 
-# Two guesses, labelled as such per CLAUDE.md.
+# This used to have a derivation. It no longer does, and saying so is the point.
 #
-# The floor is derived, not guessed: RULES asks the model to return the complete
-# contents of every file it changes, so the output must be at least as large as
-# what it is rewriting. That part is arithmetic.
+# The old reasoning was: RULES asks for the complete contents of every file the
+# model changes, so output must be at least as large as what it is rewriting.
+# That was genuine arithmetic. It expired when RULES stopped asking for whole
+# files (see patch.py for why it had to). Output now scales with the size of the
+# *change*, which nothing here can predict.
 #
-# These two are not arithmetic:
+# So this is now a deliberately over-provisioned ceiling, kept rather than
+# shrunk because an unused ceiling costs nothing and a too-small one produces an
+# empty billed reply. It is a guess wearing no disguise.
 #
-# REWRITE_HEADROOM  a rewritten file is usually a bit longer than the original
-# REASONING_FLOOR   a reasoning model spends output tokens thinking before it
-#                   speaks, and we cannot predict how many
+# What would settle a real number, once there are enough search/replace runs:
 #
-# What would settle them: `select finish_reason, count(*) from model_calls group
-# by 1`. Any 'length' rows mean the budget is too small and the model is being
-# cut off mid-answer. Zero 'length' rows over a few dozen varied tickets means
-# these are big enough, and the reasoning floor could then be tuned down against
-# `avg(reasoning_tokens)` to stop overpaying for headroom nobody uses.
+#   select max(output_tokens), avg(output_tokens) from model_calls
+#    where role = 'builder' and status = 'ok';
+#
+# and the same for role='fixer'. Until then, note that across 118 calls this
+# project has never once recorded finish_reason='length', so nothing has ever
+# been cut off by a budget of this shape.
 REWRITE_HEADROOM = 1.5
 REASONING_FLOOR = 2_000
 
@@ -125,7 +128,9 @@ def run_builder(
         max_completion_tokens=budget,
     )
 
-    edits = parse_edits(record.content)
+    # Takes the repo because a reply now describes a change, and a change has no
+    # meaning without the thing it changes.
+    edits = parse_edits(record.content, repo)
 
     # The ticket named the files it expected to change. Anything outside that
     # set is not necessarily wrong, but it was not agreed, and a human should

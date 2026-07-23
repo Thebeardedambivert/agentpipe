@@ -44,9 +44,22 @@ VALIDATE_IS_42 = (
 # A validation command that cannot give an answer: exit 2 is "broken", not "fail".
 VALIDATE_BROKEN = 'python -c "import sys; sys.exit(2)"'
 
-# Model replies, in the file-block format RULES asks for.
-PATCH_42 = "--- answer.txt\n42\n--- end"
-PATCH_7 = "--- answer.txt\n7\n--- end"
+# Model replies, in the format RULES asks for.
+#
+# answer.txt never exists at the start of a run, so a first attempt CREATES it and
+# any retry EDITS what the previous attempt wrote. That asymmetry is not an
+# artefact of the tests, it is the real shape of the loop: attempt 2 rebuilds its
+# pack from the repo as it is now, so it sees attempt 1's file and quotes from it.
+CREATE_42 = "--- answer.txt NEW\n42\n--- end"
+CREATE_7 = "--- answer.txt NEW\n7\n--- end"
+FIX_7_TO_42 = (
+    "--- answer.txt\n<<<<<<< SEARCH\n7\n=======\n42\n>>>>>>> REPLACE\n--- end"
+)
+# A change that changes nothing: applies cleanly, leaves the answer wrong. For the
+# runs that must keep failing until the budget is spent.
+STILL_7 = (
+    "--- answer.txt\n<<<<<<< SEARCH\n7\n=======\n7\n>>>>>>> REPLACE\n--- end"
+)
 PROSE = "Sure, I can help you with that!"
 
 
@@ -124,7 +137,7 @@ def repo(tmp_path):
 
 
 def test_passes_on_first_try(repo):
-    client, fake = client_for([PATCH_42])
+    client, fake = client_for([CREATE_42])
     r = run_loop(_ticket(VALIDATE_IS_42), repo, client, "fake", max_attempts=3)
     assert r.verdict == "pass"
     assert r.attempts == 1
@@ -133,7 +146,7 @@ def test_passes_on_first_try(repo):
 
 def test_fails_then_passes_and_feeds_the_failure_back(repo):
     """The heart of Layer 3: attempt 2 is built with attempt 1's failure in hand."""
-    client, fake = client_for([PATCH_7, PATCH_42])
+    client, fake = client_for([CREATE_7, FIX_7_TO_42])
     r = run_loop(_ticket(VALIDATE_IS_42), repo, client, "fake", max_attempts=3)
     assert r.verdict == "pass"
     assert r.attempts == 2
@@ -145,7 +158,7 @@ def test_fails_then_passes_and_feeds_the_failure_back(repo):
 
 
 def test_exhausts_when_never_fixed(repo):
-    client, fake = client_for([PATCH_7])  # always wrong
+    client, fake = client_for([CREATE_7, STILL_7])  # never gets there
     r = run_loop(_ticket(VALIDATE_IS_42), repo, client, "fake", max_attempts=3)
     assert r.verdict == "exhausted"
     assert r.attempts == 3
@@ -155,7 +168,7 @@ def test_exhausts_when_never_fixed(repo):
 def test_broken_validation_stops_loudly_without_burning_the_budget(repo):
     """Exit 2 is a broken command, not a failing test. The model can't fix pytest
     not being installed, so retrying would just waste money."""
-    client, fake = client_for([PATCH_42])
+    client, fake = client_for([CREATE_42])
     r = run_loop(_ticket(VALIDATE_BROKEN), repo, client, "fake", max_attempts=3)
     assert r.verdict == "blocked"
     assert r.attempts == 1
@@ -164,7 +177,7 @@ def test_broken_validation_stops_loudly_without_burning_the_budget(repo):
 
 def test_unparseable_reply_is_a_recoverable_attempt(repo):
     """A prose reply is a failed attempt the model can fix, not a crash."""
-    client, fake = client_for([PROSE, PATCH_42])
+    client, fake = client_for([PROSE, CREATE_42])
     r = run_loop(_ticket(VALIDATE_IS_42), repo, client, "fake", max_attempts=3)
     assert r.verdict == "pass"
     assert r.attempts == 2
@@ -174,7 +187,7 @@ def test_unparseable_reply_is_a_recoverable_attempt(repo):
 def test_exhaustion_does_not_trip_the_recursion_limit(repo):
     """A longer run must stop on our 'exhausted' verdict, not LangGraph's
     GraphRecursionError surfacing from underneath."""
-    client, _ = client_for([PATCH_7])
+    client, _ = client_for([CREATE_7, STILL_7])
     r = run_loop(_ticket(VALIDATE_IS_42), repo, client, "fake", max_attempts=5)
     assert r.verdict == "exhausted"
     assert r.attempts == 5
@@ -205,7 +218,7 @@ def test_green_validation_but_failing_acceptance_warns(repo):
         'python -c "import sys; sys.exit(0 if open(\'answer.txt\').read().strip() == \'999\' else 1)"'
     )
     t = _ticket(validate_exists, check=check_999)
-    client, _ = client_for([PATCH_42])
+    client, _ = client_for([CREATE_42])
     r = run_loop(t, repo, client, "fake", max_attempts=2)
     assert r.verdict == "pass"
     assert r.acceptance_warning is not None
@@ -230,8 +243,8 @@ def test_resume_recovers_landed_work_for_free(repo):
     reply, finds the ticket already satisfied, and spends nothing: no new call."""
     store = InMemoryCallStore()
     run = "run-resume-landed"
-    store.record(_recorded(run, 2, PATCH_42))
-    fake = SequencedFakeOpenAI([PATCH_42])
+    store.record(_recorded(run, 2, CREATE_42))
+    fake = SequencedFakeOpenAI([CREATE_42])
     client = MeteredClient(store=store, prices=PRICES, client=fake, run_id=run)
 
     r = run_loop(_ticket(VALIDATE_IS_42), repo, client, "fake",
@@ -245,8 +258,8 @@ def test_resume_continues_from_the_next_attempt(repo):
     fail, and continues from the next attempt, not from 1."""
     store = InMemoryCallStore()
     run = "run-resume-continue"
-    store.record(_recorded(run, 1, PATCH_7))
-    fake = SequencedFakeOpenAI([PATCH_42])
+    store.record(_recorded(run, 1, CREATE_7))
+    fake = SequencedFakeOpenAI([FIX_7_TO_42])
     client = MeteredClient(store=store, prices=PRICES, client=fake, run_id=run)
 
     r = run_loop(_ticket(VALIDATE_IS_42), repo, client, "fake",
@@ -258,7 +271,7 @@ def test_resume_continues_from_the_next_attempt(repo):
 
 def test_resume_with_no_history_starts_fresh(repo):
     store = InMemoryCallStore()
-    fake = SequencedFakeOpenAI([PATCH_42])
+    fake = SequencedFakeOpenAI([CREATE_42])
     client = MeteredClient(store=store, prices=PRICES, client=fake, run_id="never-ran")
 
     r = run_loop(_ticket(VALIDATE_IS_42), repo, client, "fake",
@@ -272,8 +285,8 @@ def test_resume_with_budget_already_spent_is_exhausted(repo):
     finds no budget left, and stops without a new call."""
     store = InMemoryCallStore()
     run = "run-resume-spent"
-    store.record(_recorded(run, 3, PATCH_7))
-    fake = SequencedFakeOpenAI([PATCH_42])
+    store.record(_recorded(run, 3, CREATE_7))
+    fake = SequencedFakeOpenAI([CREATE_42])
     client = MeteredClient(store=store, prices=PRICES, client=fake, run_id=run)
 
     r = run_loop(_ticket(VALIDATE_IS_42), repo, client, "fake",
@@ -294,7 +307,7 @@ def test_a_run_is_one_trace_with_real_ids(repo):
     on trace ids.
     """
     configure_tracing()
-    client, _ = client_for([PATCH_7, PATCH_42])  # fail once, then pass: two calls
+    client, _ = client_for([CREATE_7, FIX_7_TO_42])  # fail once, then pass: two calls
     r = run_loop(_ticket(VALIDATE_IS_42), repo, client, "fake", max_attempts=3)
 
     assert r.verdict == "pass"
@@ -329,7 +342,7 @@ def test_gate_blocks_a_wrong_but_passing_patch_then_passes(repo):
     """The heart of Layer 6 Stage 2: tests pass on attempt 1 but the judge blocks,
     so the builder tries again, and the second patch clears the judge."""
     # build 7 -> tests pass -> judge blocks -> build 42 -> tests pass -> judge passes
-    client, fake = client_for([PATCH_7, JUDGE_BLOCK, PATCH_42, JUDGE_PASS])
+    client, fake = client_for([CREATE_7, JUDGE_BLOCK, FIX_7_TO_42, JUDGE_PASS])
     r = run_loop(_ticket(VALIDATE_EXISTS), repo, client, "fake",
                  max_attempts=3, gate=True)
     assert r.verdict == "pass"
@@ -341,7 +354,7 @@ def test_gate_blocks_a_wrong_but_passing_patch_then_passes(repo):
 
 def test_gate_off_never_judges(repo):
     """Default behaviour is unchanged: no gate, no judge calls, no judges recorded."""
-    client, fake = client_for([PATCH_7])  # 7 is 'wrong' but the gate is off
+    client, fake = client_for([CREATE_7])  # 7 is 'wrong' but the gate is off
     r = run_loop(_ticket(VALIDATE_EXISTS), repo, client, "fake", max_attempts=3)
     assert r.verdict == "pass"
     assert r.judges == ()
@@ -350,7 +363,7 @@ def test_gate_off_never_judges(repo):
 
 def test_gate_exhausts_when_the_judge_keeps_blocking(repo):
     """A judge that never clears is bounded by max_attempts, not an infinite loop."""
-    client, fake = client_for([PATCH_7, JUDGE_BLOCK, PATCH_42, JUDGE_BLOCK])
+    client, fake = client_for([CREATE_7, JUDGE_BLOCK, FIX_7_TO_42, JUDGE_BLOCK])
     r = run_loop(_ticket(VALIDATE_EXISTS), repo, client, "fake",
                  max_attempts=2, gate=True)
     assert r.verdict == "exhausted"
@@ -362,7 +375,7 @@ def test_gate_exhausts_when_the_judge_keeps_blocking(repo):
 def test_gate_fails_open_when_the_judge_reply_is_unusable(repo):
     """A broken judge must not block otherwise-passing work: it passes, with a note,
     and records no verdict."""
-    client, fake = client_for([PATCH_42, JUDGE_PROSE])
+    client, fake = client_for([CREATE_42, JUDGE_PROSE])
     r = run_loop(_ticket(VALIDATE_EXISTS), repo, client, "fake",
                  max_attempts=3, gate=True)
     assert r.verdict == "pass"
@@ -377,7 +390,7 @@ def test_gate_is_unguarded_and_free_when_no_semantic_criteria(repo):
         'python -c "import sys; sys.exit(0 if open(\'answer.txt\').read().strip() '
         "== '42' else 1)\""
     )
-    client, fake = client_for([PATCH_42])  # no judge reply needed; none is requested
+    client, fake = client_for([CREATE_42])  # no judge reply needed; none is requested
     r = run_loop(_ticket(VALIDATE_EXISTS, check=check), repo, client, "fake",
                  max_attempts=3, gate=True)
     assert r.verdict == "pass"
