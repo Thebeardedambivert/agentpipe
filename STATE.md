@@ -70,6 +70,14 @@ have. Was not the fix it was sold as.
 
 ## Next, in order
 
+**0. Proven on a real third-party codebase. (Done, 23 July 2026, and it failed
+informatively.)** `mahmoud/boltons`, real open issue #301, one attempt on
+`gpt-5.4-mini`. agentpipe refused the patch; applying it by hand showed 445/445
+tests green, the bug still unfixed, and the BSD licence silently edited. See
+"the whole-file rule" under Known gaps. This is the first evidence about how the
+pipeline behaves on code it did not grow up with, and the answer is: the patch
+format is the weak point, not the context builder.
+
 **1. Proven end-to-end on real work. (Done, 18 July 2026.)**
 The pipeline ran a real ticket start to finish on `gpt-5.4-mini`: TASK-TRUNCATE,
 implement `truncate(text, length)` on a scratch repo. Result: PASSED in 1 attempt,
@@ -324,8 +332,69 @@ Consequences worth stating:
   failure mode here.
 
 Found by arithmetic before any spend, which is the cheapest kind of finding.
-Replace these projections with measured numbers once a large ticket has actually
-run.
+
+**Then it was run for real, and the whole-file rule turned out to be worse than
+expensive. It is unsafe.**
+
+The first time agentpipe has ever been pointed at a real third-party codebase:
+`mahmoud/boltons` (112 files, 445 tests in 8.5s, no dependencies, BSD), on its
+real open issue #301, whose bug was verified to still reproduce before the ticket
+was written. One attempt, `gpt-5.4-mini`, `--apply`.
+
+```
+input 9,677   output 8,820   thinking 0   finish_reason stop   $0.046948
+reply 39,267 chars      agentpipe verdict: REFUSED (no --- end terminator)
+```
+
+Four findings, in ascending order of importance.
+
+**1. Not truncation.** The prediction above was that a large file would be cut off
+mid-reply. Wrong: `finish_reason='stop'`. The model finished, and simply never
+wrote the seven-character `--- end`. boltons files end with their own
+`# end funcutils.py` comment, and after 39,000 characters that appears to have
+satisfied the model's sense of an ending. Across all 118 calls this project has
+ever made, **not one has ever truncated**. The output budget in `builder.py`
+continues to solve a problem that has never occurred.
+
+**2. Tests are not evidence, demonstrated on somebody else's code.** Applying the
+rejected reply by hand: **445 of 445 boltons tests passed**. And the ticket's own
+acceptance check still failed. The patch did not fix the bug. This is the founding
+thesis of the project reproduced on a real repository: green tests over work that
+was not done.
+
+**3. It silently altered the BSD licence.** Asked to retype a 38,692 character
+file to change a few lines, it rewrote the copyright header. From the diff:
+
+```
+-# LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+-# A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
++# LIMITED TO THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
++# A PARTICULAR PURPOSE. IN NO EVENT SHALL THE COPYRIGHT
+
+-# LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+-# DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++# LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; OR BUSINESS ...
+```
+
+`ARE DISCLAIMED` deleted from the warranty disclaimer. `LOSS OF USE, DATA, OR
+PROFITS;` deleted from the damages clause. No test covers a licence header, so
+nothing anywhere would have caught it. **The whole-file rule does not just cost
+more, it gives the model licence to change anything in the file while it is
+retyping.** A diff or search/replace format makes that structurally impossible,
+which upgrades it from a cost optimisation to a safety fix.
+
+**4. The loop would have called this a PASS.** Validation (`pytest -q
+tests/test_funcutils.py`) passes on this patch. `loop.py` returns `verdict="pass"`
+when validation passes, and `_acceptance_disagreement` attaches the failing
+acceptance check as a *warning*, not a gate. So with `--max-attempts 3` this run
+reports PASSED, with a note, on a patch that does not fix the reported bug and
+quietly edits a licence. That gap is documented in `loop.py`'s own docstring
+("A warning, not a gate... Layer 6's judge is what actually closes it") and has
+now been seen live.
+
+What saved the working tree was `parse_edits` refusing a reply with no terminator,
+which is the right outcome reached for an unrelated reason. Strictness paid off
+by luck.
 
 **The test suite used to leave background git daemons behind. (Closed, and it
 took a machine down first.)**
