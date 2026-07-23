@@ -161,11 +161,71 @@ read 13 of 14 for both and would call them equivalent. Right-verdict-for-the-
 right-reason separates them **13 to 11**. That metric was argued for on principle
 when it was written; this is it paying rent.
 
-**Left deliberately undone.** `JUDGE_RULES` is unchanged. Editing it changes the
-gate's behaviour, and this stage measures rather than tunes. The machinery to prove
-a fix works already exists: `rules_hash` keeps rows from before and after a prompt
-edit out of the same average. That column was built before there was anything to
-use it on, and there now is.
+## Stage 3c: the obvious prompt fix, and why it was reverted
+
+With a blind spot identified, the obvious next move is to fix the prompt. It was
+tried, measured, and put back. **The result is negative and is recorded because it
+is negative**, which is the only kind of result that is easy to lose.
+
+**The change.** A general instruction, deliberately not one about floats, because a
+prompt patched at a known case is overfitting wearing a fix's clothes:
+
+> Decide from what the code does, not from what it looks like. Pick a concrete
+> input that the criterion is about, follow the code with that input, and see what
+> actually comes out. [...] Your reason must say what happens for a specific input.
+> Restating what the code says is not a reason.
+
+**What happened.** `rules_hash` moved `32fd708260d5c68f` -> `5d671398b831c49c`, so
+the before and after rows are separable in `judge_evals` rather than averaged.
+
+| | before | after |
+|---|---|---|
+| false pass | 1 | 1 |
+| false block | 0 | 0 |
+| right verdict | 13/14 | 13/14 |
+| right verdict for the right reason | 13/14 | 13/14 |
+| cost, same 14 cases at full price | $0.008853 | $0.011866 |
+
+No accuracy change. About 34% more expensive per gated run, forever.
+
+**But the failure moved, and that is the finding.** The reason field changed from
+
+> "The function returns True when sum(prices) equals expected, covering
+> mathematically equal amounts."
+
+to
+
+> "For prices=[1, 2] and expected=3, sum(prices) is 3 so the function returns True."
+
+The judge obeyed the instruction exactly. It picked a concrete input and traced the
+code. Then it picked `[1, 2]` and `3`, integers, which have no floating point
+problem at all, and concluded the criterion was met. **It complied with the letter
+of the instruction and still got the wrong answer, by choosing an input that does
+not exercise the thing being asked about.**
+
+So the blind spot is not "the judge does not check". It is "the judge chooses a
+friendly input". That is a different bug, and a sharper one: the next instruction
+would have to be about *which* input to pick, not whether to pick one.
+
+**Why it was reverted rather than iterated.** Steering the next attempt with the
+answer in hand is how a prompt gets tuned to fourteen cases and nobody remembers
+what it cost. Reverting is free (every answer under the old hash is cached, so
+re-verification replays at $0 and reproduced the baseline exactly), both attempts
+stay in the table under their own `rules_hash`, and the next attempt can start from
+a recorded negative rather than a vague memory that "we tried something".
+
+Two smaller things the experiment established, worth keeping:
+
+- The trade did not bite. Making the judge more suspicious did not produce a single
+  false block, which was the predicted risk. The six PASS cases in the dataset are
+  what make that a measurement rather than a hope.
+- Reading only the score would have said "no change, try again". Reading the reason
+  said the failure had moved. **A verdict-only eval would have thrown away the most
+  useful thing this experiment produced.**
+
+**Left deliberately undone.** `JUDGE_RULES` is back to the shipped version, so the
+gate's behaviour is unchanged by this stage. The blind spot is open and recorded in
+STATE.md.
 
 **A second, found by self-review before it could bite.** `run_judge` raised
 `JudgeError` after the call had been made and billed, and the exception carried no

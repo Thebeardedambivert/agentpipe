@@ -285,14 +285,34 @@ and the span hardcodes `gen_ai.system = "openai"`, which would be a lie.
 
 Both of the Layer 0 gaps recorded in PLAN.md are now closed.
 
-**The judge has a known, stable blind spot, and nothing has been done about it
-yet. (Open.)** It reads an equality check and concludes the criterion about
+**The judge has a known, stable blind spot. The obvious fix was tried and did not
+work. (Open.)** It reads an equality check and concludes the criterion about
 equality is met, without asking whether that check is correct. 6 of 6 samples on
-`gpt-5.4-mini`, and `gpt-5.4-nano` does the same. Deliberately left unfixed in this
-stage: changing `JUDGE_RULES` changes the gate's behaviour, and this stage measures
-rather than tunes. The machinery to prove a fix works now exists (`rules_hash`
-keeps before-and-after rows from averaging together), which is the point of having
-built it before needing it.
+`gpt-5.4-mini`, and `gpt-5.4-nano` does the same.
+
+A general prompt instruction was added telling the judge to trace a concrete input
+rather than reason from the shape of the code, and to give a reason naming that
+input. Measured, then reverted. `rules_hash` moved `32fd7082` -> `5d671398`, so both
+attempts sit in `judge_evals` separately rather than averaged:
+
+- **No accuracy change.** Still 1 false pass, still 0 false blocks, still 13/14 on
+  both verdict metrics.
+- **About 34% more expensive** on the same fourteen cases ($0.008853 -> $0.011866
+  at full price), for every gated run, forever.
+- **The failure moved, which is the actual finding.** The reason changed from
+  restating the code to `"For prices=[1, 2] and expected=3, sum(prices) is 3 so the
+  function returns True."` The judge obeyed the instruction, traced a concrete
+  input, and picked integers, which have no floating point problem. The blind spot
+  is not "does not check", it is "chooses a friendly input". Different bug, sharper
+  diagnosis, and the next attempt has to constrain *which* input.
+- Reading the score alone would have said "no change, try again". Reading the
+  reason said the failure had moved. A verdict-only eval would have discarded the
+  most useful output of the experiment.
+
+Reverted rather than iterated on purpose: steering attempt two with the answer in
+hand is how a prompt ends up tuned to fourteen cases with no record of the cost.
+Reverting was free, since every answer under the old hash is cached; re-running
+reproduced the baseline exactly at $0 billed.
 
 **The eval dataset has no harvest path. (Open, and it is the one that matters.)**
 Cases are built by hand. `TASK-GATE` could not become a case at all because the
