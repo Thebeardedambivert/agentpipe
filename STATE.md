@@ -1,15 +1,15 @@
 # STATE
 
-Where this actually is, as of 18 July 2026. Read after CLAUDE.md and PLAN.md.
+Where this actually is, as of 23 July 2026. Read after CLAUDE.md and PLAN.md.
 
 CLAUDE.md is the rules. PLAN.md is the design. This is the situation.
 
 ## Built
 
 Layers 0, 1, 2, 3, Layer 5 complete (reviewer, fixer loop, audit table), and Layer 6
-Stages 1 and 2 (the judge, and the judge as a gate). 196 tests, all passing under
-the bare `pytest` CI runs. CI (`.github/workflows/ci.yml`) runs the suite against a
-real Postgres on every push.
+complete (the judge, the judge as a gate, and the eval dataset that measures it).
+237 tests, all passing under the bare `pytest` CI runs. CI
+(`.github/workflows/ci.yml`) runs the suite against a real Postgres on every push.
 
 ```
 telemetry.py   the seam. Every model call goes through MeteredClient.call()
@@ -26,6 +26,8 @@ config.py      ModelMap: which model each role uses, defaults to the base model
 findings.py    the audit port: record findings and outcomes to review_findings
 judge.py       the eval gate: grade check-less acceptance criteria, three-state
 loop.py (gate) --gate makes the judge a second gate in the loop, blocks rebuild
+evals.py       the dataset that grades the judge. Labelled cases in, matrix out
+evalstore.py   the accuracy port: record what the judge said vs what was labelled
 run.py         CLI. --max-attempts loops, --review, --fix, --judge, --gate
 preflight.py   four checks before you trust any number
 ```
@@ -101,10 +103,10 @@ Still open, and deliberately so:
 - Trust boundary: checks run with your privileges. Fine while you author your own
   tickets, needs a sandbox the day they come from anywhere you do not control.
 
-**3. Layer 5 is complete and Layer 6 Stages 1 and 2 (judge, then judge-as-gate) are
-built. Next is Layer 6 Stage 3 (the eval dataset).** The loop, crash-safe resume,
-and the tracing tree are done; the cache claim is proven (92%, above the
-~1,024-token threshold; see the baseline).
+**3. Layer 5 and Layer 6 are both complete. Next is Layer 4 or Layer 7, the two
+industrial layers, and neither is urgent.** The loop, crash-safe resume, and the
+tracing tree are done; the cache claim is proven (92%, above the ~1,024-token
+threshold; see the baseline).
 
 Layer 5 is staged (see `plans/layer5.md`): Stage 1 the reviewer, Stage 2 the
 fixer loop plus model routing, Stage 3 the audit table.
@@ -167,8 +169,47 @@ authority, which Stage 3 is what makes safe. Proven end to end on a real run:
 builder -> tests pass -> real judge PASS, total cost including the judge (TASK-GATE).
 The block-then-rebuild cycle is proven deterministically by test; a real model kept
 writing correct code first try, so it was not watched live (same honesty as Stage
-2's revert guard). Still open, by design: Stage 3 is the eval dataset that measures
-whether the judge, now driving the builder, is actually right.
+2's revert guard).
+
+Layer 6 Stage 3 (the eval dataset, on the `layer6-evals` branch) is what measures
+the judge that Stage 2 put in charge. Eight labelled cases under `evals/cases/`,
+each a directory holding a real ticket (parsed by `Ticket.from_file`, no second
+parser), the code as it was (read through the real `Repo`), and labels saying which
+criteria that code actually meets. `evals.py` grades, `evalstore.py` records, and
+migration 004 adds `judge_evals` with `judge_accuracy` and `judge_stability`.
+
+The two failures it exists to see, neither of which anything caught before: **false
+pass** (labelled not_satisfied, judged satisfied: the gate waves wrong code
+through) and **false block** (labelled satisfied, judged not_satisfied: the gate
+burns a rebuild attempt on correct code). Before Stage 2 only the first mattered
+and it was advisory. After Stage 2 both cost money every run.
+
+Labels are two-state where the judge is three, on purpose: a labeller who is
+uncertain has not finished making the case. Each label carries its criterion's
+*text* as well as its index, and the loader refuses to run when they disagree,
+because reordering a ticket's bullets would otherwise silently repoint every label
+and produce a confident wrong number. Real and constructed cases are reported as
+separate cuts and never merged: harvesting only real runs is survivorship-biased in
+exactly the direction that matters, since the dangerous case is one nobody noticed.
+
+**The first real result, and how to read it.** `gpt-5.4-mini`, 8 cases, 16
+criteria, $0.005021: 16 of 16 agreed, zero false passes, zero false blocks, zero
+abstentions, 8 of 8 verdicts right for the right reason. At `--repeat 5`: 80 of 80,
+and `judge_stability` shows not one criterion where the judge gave two different
+answers.
+
+**That is not a win, and the plan said so before the run.** A perfect first result
+is evidence the constructed cases are too easy, not evidence the judge is good. The
+judge did beat both baits (a range check that validates correctly then returns a
+default anyway; correct code whose only error path is an implicit `KeyError`),
+which is more than a pattern-matcher manages. But an instrument that has never once
+disagreed with its calibration has not been calibrated. The dataset's next job is
+to acquire a case the judge gets wrong.
+
+Report and view print counts, never rates: at eight cases one flipped verdict moves
+a percentage by double digits and still reads as a measurement. Nothing here is a
+pass mark, no threshold was introduced, and the gate's fail-open behaviour is
+unchanged. This stage measures; it does not tune.
 
 Layer 4 (event-sourced replay) and Layer 7 (Temporal) are the industrial layers:
 worth it at volume or for the learning, not before. `checks.py` already seeded the
@@ -203,6 +244,16 @@ and the span hardcodes `gen_ai.system = "openai"`, which would be a lie.
 ## Known gaps
 
 Both of the Layer 0 gaps recorded in PLAN.md are now closed.
+
+**The eval dataset has no harvest path. (Open, and it is the one that matters.)**
+Cases are built by hand. `TASK-GATE` could not become a case at all because the
+run's files were never captured, so a real judge verdict from a real run is
+already unrecoverable. Five of the eight cases are constructed for that reason,
+and constructed cases were written by the same person who wrote the judge's
+prompt. Until a real disagreement can be turned into a case cheaply, the dataset
+grows in the direction of what we imagine rather than what happens. What would fix
+it: capture the judged files alongside the verdict, so `--gate` on a real ticket
+leaves behind everything a case needs.
 
 **Spans go nowhere. (Closed.)** `trace_id` and `span_id` used to write as all
 zeros, because no tracer was configured and OTel's no-op default discarded every
@@ -276,3 +327,14 @@ None errored. All lied. This is why the meter exists, and it is why Andrew's
 70,000 sat there unnoticed: nothing was broken, it just cost money.
 
 When something looks fine, that is not evidence. Check the table.
+
+**A sixth, running the other way (23 July 2026).** The eval harness's first
+`--repeat 5` reported $0.024944 spent. Only $0.019923 was billed: sample 0 of every
+case replayed from the run before it, and `cost_usd` on a replayed record carries
+the original price. This one *over*stated rather than hid, which makes it the
+friendlier direction, but it is the same family: a number that looked right,
+computed correctly, and answered a different question than the one being asked.
+The money was the small half. The real half is that a replayed sample is not an
+independent draw, so counting replays toward stability would have reported perfect
+consistency for a judge that was asked once. Fixed by separating billed from full
+price; pinned by `test_a_replayed_sample_is_not_counted_as_spend`.

@@ -1,0 +1,19 @@
+{
+  "provenance": "constructed",
+  "note": "Aimed straight at the false-pass quadrant, which no harvest of runs we were happy with can supply. The bait is that the range check the criterion asks for is right there and correct; the failure is the branch after it. A judge that pattern-matches on '1 <= port <= 65535' says satisfied and the gate waves a silent config downgrade into production.",
+  "files": ["ports.py"],
+  "labels": [
+    {
+      "criterion": 0,
+      "text": "a port outside 1..65535 is rejected rather than replaced with a default",
+      "expect": "not_satisfied",
+      "why": "an out-of-range port falls through to return DEFAULT_PORT. parse_port('99999') returns 8080 and the caller is never told its configuration was wrong. The range check reads as validation but only guards the happy path."
+    },
+    {
+      "criterion": 1,
+      "text": "a valid port is returned unchanged",
+      "expect": "satisfied",
+      "why": "any value in 1..65535 returns from the branch untouched."
+    }
+  ]
+}

@@ -34,13 +34,17 @@ Three rules hold the whole design up:
 | Layer | What | Status |
 |---|---|---|
 | 0 | Metered model client + event store | **done** |
-| 1 | Deterministic context builder | next |
-| 2 | Builder node, single shot | |
-| 3 | Validation loop + attempt counting | |
-| 4 | Event-sourced pack replay | |
-| 5 | Reviewer + fixer, harness split | |
-| 6 | Evals as the gate before review | |
-| 7 | Temporal wraps the loop | |
+| 1 | Deterministic context builder | **done** |
+| 2 | Builder node, single shot | **done** |
+| 3 | Validation loop + attempt counting | **done** |
+| 4 | Event-sourced pack replay | deferred, see PLAN.md |
+| 5 | Reviewer + fixer, harness split | **done** |
+| 6 | Evals as the gate before review | **done** |
+| 7 | Temporal wraps the loop | deferred, see PLAN.md |
+
+Layers 4 and 7 are the industrial ones. They earn their complexity at volume and
+under real failure, and PLAN.md says plainly that on a side project they are
+ceremony until then.
 
 Full reasoning for every layer, including each decision and why it was made:
 **[PLAN.md](./PLAN.md)**. Current state and what is next: **[STATE.md](./STATE.md)**.
@@ -112,16 +116,43 @@ no dashboard, because you will believe it.
 pytest -q
 ```
 
-106 tests. The Layer 0 ones do not test whether OpenAI works. They test whether
+237 tests. The Layer 0 ones do not test whether OpenAI works. They test whether
 the three guarantees hold: never pay twice, the cost number is right, and the
-meter never kills the run. The rest cover the context builder and patch parsing
-from Layers 1 and 2, and run against a real Postgres in CI on every push.
+meter never kills the run. The rest cover the context builder, patch parsing, the
+loop, the reviewer and fixer, and the judge, and run against a real Postgres in CI
+on every push.
 
 Two of them exist because of bugs found while writing the first version. The
 interesting one: the original code replayed *any* cached call, including
 failures. A five-second network blip would have been cached as a permanent
 result, and no retry could ever have dislodged it, because retrying was exactly
 what the cache suppressed. Caching success is safe. Caching failure is a trap.
+
+## Layer 6: who judges the judge
+
+Layer 6 puts a model in front of the expensive part: after the tests pass, a judge
+grades the acceptance criteria no exit code can check, and with `--gate` a failed
+criterion sends the builder back to work.
+
+Which raises the obvious question, so `evals/` answers it. Eight labelled cases,
+each a real ticket plus the code as it was plus a human's verdict on every
+criterion, and a harness that grades the judge against them:
+
+```bash
+python -m agentpipe.evals --dry-run     # validate the dataset, free
+python -m agentpipe.evals               # grade the judge, real calls
+```
+
+It reports counts and refuses to report a rate. At eight cases a percentage moves
+by double digits on one flipped verdict and still reads like a measurement. The
+two numbers it exists to produce are **false pass** (the gate waves wrong code
+through) and **false block** (the gate burns a rebuild on correct code); the
+second only started costing money once the judge was allowed to drive the builder.
+
+First run on `gpt-5.4-mini`: 16 of 16 criteria agreed, and 80 of 80 across five
+samples. That is recorded as a warning about the dataset, not a win for the judge.
+An instrument that has never disagreed with its calibration has not been
+calibrated, and the dataset's next job is to acquire a case the judge gets wrong.
 
 ## Credit
 

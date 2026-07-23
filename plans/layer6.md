@@ -40,10 +40,90 @@ Layer 0, so cost tracks by role for free.
 - **Stage 2: the gate (built).** After tests pass, the judge grades the semantic
   criteria, and a BLOCK feeds its reasons back to the builder like a test failure,
   so the loop rebuilds until the judge is satisfied or the attempt budget is spent.
-- **Stage 3: the eval dataset.** A small set of labelled real patches (satisfied /
-  not) to measure the judge's own accuracy, so the gate is not itself lying. The
-  "who judges the judge" piece, and the P2 eval-dataset exercise. Doubly needed now
-  that Stage 2 lets the judge drive the builder.
+- **Stage 3: the eval dataset (built).** A small set of labelled patches to measure
+  the judge's own accuracy, so the gate is not itself lying. The "who judges the
+  judge" piece, and the P2 eval-dataset exercise. Doubly needed now that Stage 2
+  lets the judge drive the builder.
+
+## Stage 3 (built)
+
+The judge gets graded. `evals.py` (dataset, scorer, CLI), `evalstore.py` (the audit
+port), migration 004 (`judge_evals`, `judge_accuracy`, `judge_stability`), and a
+dataset of eight labelled cases under `evals/cases/`.
+
+**Decisions made with the user, and why.**
+
+- **A case is a directory**, not a bespoke file format: `ticket.md` parsed by
+  `Ticket.from_file`, `code/` read through the real `Repo`, `case.json` for the
+  labels. Any custom format would be a second way to read a ticket, and a second
+  implementation that drifts from the first is the `InMemoryCallStore` /
+  `PostgresCallStore` bug in a new costume. The eval has to feed the judge exactly
+  what production feeds it or it is grading a judge that does not exist.
+- **Labels are two-state where the judge is three.** A labeller who is uncertain
+  has not finished making the case, so `uncertain` is an answer the judge may give
+  and never a ground truth it can be measured against. A consequence, taken
+  deliberately: an "uncertain is the right answer" case is not expressible, so
+  abstention is measured as a miss (a safer miss than a false pass) rather than
+  scored as correct. Weakening the label rule to allow it would have cost more than
+  the case was worth.
+- **Labels carry the criterion's text, not just its index, and the loader refuses a
+  mismatch.** Without it, reordering a ticket's acceptance bullets silently
+  repoints every label and the eval reports a confident wrong number. That is the
+  shape of all five bugs in STATE.md, and the guard is three lines.
+- **Real and constructed cases, never merged in a number.** Harvesting only real
+  runs is survivorship-biased in the exact direction that matters: the dangerous
+  case is the judge calling wrong code satisfied, and by definition that is a case
+  nobody noticed, so it never appears in a harvest of runs we were happy with.
+  Constructed cases aim at that quadrant directly. The cost is that they were
+  written by the same person who wrote the judge's prompt, which the split cut
+  keeps visible.
+- **Counts, never rates**, in the report and in the view. At eight cases one
+  flipped verdict moves a percentage by double digits and still reads as a
+  measurement. `graded` sits next to every count so anyone can divide while looking
+  at what they are dividing. What would settle it: enough cases that a single flip
+  cannot move the number by more than a point.
+- **`rules_hash` on every row.** Rows from before and after a `JUDGE_RULES` edit
+  are not comparable, and averaging them produces a number describing no judge that
+  ever existed.
+- **`--repeat N`, default 1.** Each sample runs at a distinct `attempt_index`,
+  which is in the idempotency key, so samples are genuinely new paid calls rather
+  than replays of one answer.
+
+**What the first real run said, stated plainly.**
+
+`gpt-5.4-mini`, 8 cases, 16 criteria, $0.005021: **16 of 16 agreed, zero false
+passes, zero false blocks, zero abstentions, 8 of 8 verdicts right for the right
+reason.** At `--repeat 5`: 80 of 80, and `judge_stability` reports not one criterion
+where the judge gave two different answers.
+
+**Do not read that as a win.** The plan for this stage said in advance that a
+perfect first result is evidence the constructed cases are too easy, not evidence
+the judge is good, and that is how it is being recorded. The judge caught the
+false-pass bait (a range check that validates correctly and then returns a default
+anyway) and the false-block bait (correct code whose only error path is an implicit
+`KeyError`), which is genuinely more than a pattern-matcher would manage. But an
+instrument that has never disagreed with its calibration has not been calibrated.
+The dataset's next job is to acquire a case the judge gets wrong.
+
+**A bug the stage found in itself.** The first `--repeat 5` run reported $0.024944.
+Only $0.019923 was billed: sample 0 of every case replayed from the previous run,
+and `cost_usd` on a replayed record carries the original price. The report now
+separates billed from full price. The money is the small half; the real half is
+that a replayed sample is not an independent draw, so counting replays toward
+stability would report perfect consistency for a judge that was asked once. Pinned
+by `test_a_replayed_sample_is_not_counted_as_spend`, which names the run.
+
+**Known gaps, deliberate.**
+
+- Eight cases, five of them constructed, is a smoke test for a sensor, not a
+  measurement of accuracy.
+- `TASK-GATE` could not be harvested: the run's files were never captured. Real
+  cases need a harvest path, which does not exist yet.
+- Packs are ~355 tokens each, well under the ~1,024 threshold, so no eval call
+  earns the cached-input discount. Expected, and consistent with the baseline.
+- Nothing about the gate changed this stage. Its fail-open behaviour, the absence
+  of a threshold, and CI not gating on judge accuracy are all unchanged, because
+  this stage measures and does not tune.
 
 ## Stage 2 (built)
 
@@ -104,7 +184,13 @@ Proven on real runs:
 
 ## Verification
 
-- `.venv/Scripts/pytest.exe -q` (bare, CI-style) green, 191 tests.
-- The decisive real check above: a patch the tests pass but a semantic criterion
+- `.venv/Scripts/pytest.exe -q` (bare, CI-style) green, 237 tests after Stage 3
+  (191 at Stage 1, 196 at Stage 2).
+- Stage 1's decisive real check: a patch the tests pass but a semantic criterion
   does not, caught by the judge with the criterion and the reason.
-- CI green (real Postgres). No schema change this stage.
+- Stage 3's: the numbers above, read back out of `judge_accuracy` and
+  `judge_stability` rather than off the terminal.
+- `python -m agentpipe.evals --dry-run` validates the whole dataset, including
+  label-to-ticket agreement, for nothing.
+- CI green. Stage 3 adds migration 004, which CI applies to a fresh database on
+  every push; the eval store contract tests run against real Postgres there.

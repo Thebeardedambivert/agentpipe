@@ -1,0 +1,19 @@
+{
+  "provenance": "constructed",
+  "note": "The all-satisfied control, and the reason a degenerate judge cannot win here. Three of the eight cases expect PASS and five expect BLOCK, so a judge that blocks everything scores 5 verdicts out of 8 and a judge that passes everything scores 3. Neither strategy beats reading the code, which is the only property that makes the other seven cases interpretable.",
+  "files": ["chunk.py"],
+  "labels": [
+    {
+      "criterion": 0,
+      "text": "a size of zero or less raises rather than looping forever",
+      "expect": "satisfied",
+      "why": "the guard raises ValueError before range() is reached, and the message names the offending size. Without it range(0, n, 0) raises a bare ValueError from the interpreter and a negative size silently returns an empty list."
+    },
+    {
+      "criterion": 1,
+      "text": "every piece except possibly the last holds exactly size items",
+      "expect": "satisfied",
+      "why": "the stride and the slice width are both size, so every slice is full except the final one, which holds len(items) % size when that is non-zero."
+    }
+  ]
+}

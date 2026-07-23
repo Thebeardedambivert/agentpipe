@@ -1,0 +1,20 @@
+{
+  "provenance": "real",
+  "source": "TASK-FIX-MINI2",
+  "note": "The code is real: this is the ellipsis bug the Layer 5 reviewer flagged and the fixer repaired on 22 Jul 2026 (text[:length] + '...' -> text[:length], $0.000310, outcome 'fixed'). The ticket around it was written for this case, because the run's ticket was not captured. Runs-but-wrong in its purest form: it passes any test that only checks the text got shorter.",
+  "files": ["truncate.py"],
+  "labels": [
+    {
+      "criterion": 0,
+      "text": "the result never exceeds length characters",
+      "expect": "not_satisfied",
+      "why": "the ellipsis is appended after the slice, so the result is length + 3 characters. truncate('hello world', 5) returns 'hello...', which is 8."
+    },
+    {
+      "criterion": 1,
+      "text": "a reader can tell that the text was shortened",
+      "expect": "satisfied",
+      "why": "the trailing ellipsis is exactly that signal. This criterion is met; it is the reason the bug is tempting."
+    }
+  ]
+}

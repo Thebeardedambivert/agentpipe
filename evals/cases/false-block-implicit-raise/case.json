@@ -1,0 +1,19 @@
+{
+  "provenance": "constructed",
+  "note": "Aimed at the false-block quadrant, which only became expensive at Stage 2: a wrong block now spends a rebuild attempt on correct code, every run. Correct code with no explicit `raise` anywhere in it. A judge scanning for the shape of a guard rather than for the behaviour asked about says not_satisfied, and the builder is sent back to fix something that is not broken.",
+  "files": ["clamp.py"],
+  "labels": [
+    {
+      "criterion": 0,
+      "text": "an unknown band produces an error rather than a silent default",
+      "expect": "satisfied",
+      "why": "the dict lookup raises KeyError, which names the offending band, and the docstring says the raise is intentional. The criterion asks for an error, not for a particular exception type or an explicit raise statement."
+    },
+    {
+      "criterion": 1,
+      "text": "the returned value is always inside the band",
+      "expect": "satisfied",
+      "why": "max(lo, min(value, hi)) is bounded by lo and hi for any numeric value, including values outside the band in either direction."
+    }
+  ]
+}
