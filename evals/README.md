@@ -56,12 +56,42 @@ python -m agentpipe.evals --dry-run --case <name>
 
 validates it for free before you spend anything.
 
+## Paired cases
+
+Six of the cases come in matched pairs: the same ticket, one copy of the code with
+a bug and one without (`strip-suffix-buggy` / `-fixed`, and so on). A pair is a
+controlled test. A judge that answers both halves the same way has not read either
+of them, and no single case can show you that.
+
 ## What the numbers are not
 
 They are counts, never rates. At this size one flipped verdict moves a percentage
-by double digits and still reads as a measurement. Nothing here is a pass mark;
+by several points and still reads as a measurement. Nothing here is a pass mark;
 whether `--gate` has earned its authority is a human call made while looking at
 the counts.
 
-Eight cases, half of them constructed, is not a measurement of accuracy. It is a
-smoke test for a sensor, and a place to put the next real disagreement.
+Fourteen cases, eleven of them constructed, is not a measurement of accuracy. It is
+a smoke test for a sensor, and a place to put the next real disagreement.
+
+## How we know it is not too easy any more
+
+The first version was eight cases and the judge scored 16 of 16. That looked like
+good news and was not. Two checks showed why:
+
+- [JudgeBench](https://arxiv.org/pdf/2410.12784), the standing benchmark for LLM
+  judges, tops out at **64%** for the best model in the world. Scoring 100% is a
+  statement about your exam.
+- Re-running with `gpt-5.4-nano`, a model 3.7x cheaper, also scored **16 of 16**.
+  A test that cannot separate those two cannot answer "which model should judge?",
+  which is one of the reasons it exists.
+
+After the expansion the judge fails a case, stably, and the two models separate.
+That is the property to protect: **if a change ever takes the score back to
+perfect, suspect the dataset before congratulating the judge.**
+
+## Verify every claim before it becomes a label
+
+While building the paired cases, two claims that came from memory turned out to be
+false when executed. Both would have shipped as ground truth. Run the code. A
+dataset nobody checks becomes a confidently wrong answer key, which is the failure
+`PriceMap.from_env()` refuses to have.

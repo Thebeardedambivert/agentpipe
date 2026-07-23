@@ -1,0 +1,19 @@
+{
+  "provenance": "constructed",
+  "note": "The correct half of the money pair. Decimal via str() keeps the decimal value the user typed rather than the nearest binary approximation, which is the same rule CLAUDE.md sets for cost in this project. Every claim below was verified by running it.",
+  "files": ["totals.py"],
+  "labels": [
+    {
+      "criterion": 0,
+      "text": "amounts that are mathematically equal are reported as matching",
+      "expect": "satisfied",
+      "why": "verified: totals_match([0.1, 0.2], 0.3) returns True. Decimal('0.1') + Decimal('0.2') is exactly Decimal('0.3'). Going through str() matters: Decimal(0.1) from the float would carry the binary error straight in."
+    },
+    {
+      "criterion": 1,
+      "text": "amounts that genuinely differ are reported as not matching",
+      "expect": "satisfied",
+      "why": "verified: totals_match([1.0, 2.0], 5.0) returns False."
+    }
+  ]
+}

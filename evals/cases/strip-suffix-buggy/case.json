@@ -1,0 +1,19 @@
+{
+  "provenance": "constructed",
+  "note": "The failure mode is documented outside this project, not invented here: PEP 616 added str.removesuffix to CPython because of 'repeated issues on Python-Ideas, Python-Dev, the Bug Tracker, and StackOverflow, related to user confusion about the existing str.lstrip and str.rstrip methods', noting users kept writing their own versions 'often with subtle bugs'. https://peps.python.org/pep-0616/ . The code here was written minimally to exhibit it, so provenance stays 'constructed' rather than overclaiming. Paired with strip-suffix-fixed: same ticket, correct code, so the pair tests whether the judge can tell them apart. Every claim below was verified by running it.",
+  "files": ["hosts.py"],
+  "labels": [
+    {
+      "criterion": 0,
+      "text": "only a trailing \".com\" is removed; characters elsewhere in the hostname are left alone",
+      "expect": "not_satisfied",
+      "why": "str.strip takes a SET OF CHARACTERS, not a suffix, and trims from both ends. Verified: 'microsoft.com' -> 'icrosoft' (the leading m is eaten), 'comcast.com' -> 'ast', 'mom.com' -> ''. The danger is that the obvious test passes: 'example.com' -> 'example' and 'shop.com' -> 'shop' are both correct by luck."
+    },
+    {
+      "criterion": 1,
+      "text": "a hostname that does not end in \".com\" is returned unchanged",
+      "expect": "satisfied",
+      "why": "verified: 'example.org' -> 'example.org'. Neither end starts with a character in the set {'.', 'c', 'o', 'm'}, so nothing is trimmed. This criterion really is met, which is what makes the other one worth catching."
+    }
+  ]
+}

@@ -98,12 +98,74 @@ where the judge gave two different answers.
 
 **Do not read that as a win.** The plan for this stage said in advance that a
 perfect first result is evidence the constructed cases are too easy, not evidence
-the judge is good, and that is how it is being recorded. The judge caught the
+the judge is good, and that is how it was recorded. The judge caught the
 false-pass bait (a range check that validates correctly and then returns a default
 anyway) and the false-block bait (correct code whose only error path is an implicit
 `KeyError`), which is genuinely more than a pattern-matcher would manage. But an
 instrument that has never disagreed with its calibration has not been calibrated.
-The dataset's next job is to acquire a case the judge gets wrong.
+
+## Stage 3b: making the dataset bite
+
+The stage shipped with "acquire a case the judge gets wrong" as its open item.
+This is that work.
+
+**Two cheap checks first, before writing anything.**
+
+- [JudgeBench](https://arxiv.org/pdf/2410.12784) (ICLR 2025) is the standing
+  benchmark for LLM judges. The best model on it scores **64%**. Scoring 100% far
+  above the field's best is a statement about the exam, not the student. This
+  turned "the dataset is probably too easy" from an opinion into an outside number.
+- Re-running the eight cases with `gpt-5.4-nano` as judge, for **$0.001408**, also
+  gave **16 of 16**. A dataset that cannot separate a model from one 3.7x cheaper
+  cannot answer the routing question it was built to answer. Recorded carefully:
+  "nano judges as well as mini" is *not* supported. Only "the dataset could not
+  tell" is.
+
+**Six new cases, in matched pairs.** Three failure modes, each with a buggy and a
+correct implementation of the *same ticket*. A pair is a controlled test: a judge
+that answers both halves identically has not read either, and no single case can
+reveal that. Sources are documented outside this project rather than invented here:
+
+| pair | failure mode | external source |
+|---|---|---|
+| `strip-suffix-*` | `str.strip(".com")` trims characters from both ends, not a suffix | PEP 616 added `removesuffix` citing "repeated issues... user confusion" |
+| `sorted-tie-order-*` | `reversed(sorted(...))` also reverses tied runs | why `reverse=True` exists |
+| `float-money-*` | `==` on floats for money | the same rule CLAUDE.md sets for cost |
+
+**Every claim in every label was verified by executing it.** Two candidate claims
+sourced from memory were discarded at that step because running them proved them
+false (`sum([0.1]*10) == 1.0` is `True`; a chosen `strip` example returned the
+correct answer by luck and did not demonstrate the bug). Both would have shipped as
+ground truth. This is the lesson of the whole stage in miniature: the dataset is
+the answer key, and an answer key nobody checks is a confidently wrong dashboard.
+
+**The finding: a false pass, the dangerous quadrant.** For
+`return sum(prices) == expected` against the criterion "amounts that are
+mathematically equal are reported as matching", `gpt-5.4-mini` answers
+**satisfied**, in **6 of 6 samples**, `judge_stability` reporting
+`distinct_answers = 1`. Its five recorded reasons are rewordings of one move:
+
+> "The function returns True when sum(prices) equals expected, covering
+> mathematically equal amounts."
+
+**It restates the code and treats the restatement as proof.** It never asks whether
+floating-point `==` means "mathematically equal" (`sum([0.1, 0.2]) == 0.3` is
+`False`). Under `--gate` this patch reaches the working tree every time, and it is
+a money bug in a checkout path. `gpt-5.4-nano` has the identical blind spot, which
+points at `JUDGE_RULES` rather than at model capability.
+
+**The dataset now discriminates, and only on the reasoning metric.** Across the six
+new cases mini disagrees once; nano disagrees four times (same false pass, plus a
+false block on the *correct* stable sort, plus two abstentions). Verdict counts
+read 13 of 14 for both and would call them equivalent. Right-verdict-for-the-
+right-reason separates them **13 to 11**. That metric was argued for on principle
+when it was written; this is it paying rent.
+
+**Left deliberately undone.** `JUDGE_RULES` is unchanged. Editing it changes the
+gate's behaviour, and this stage measures rather than tunes. The machinery to prove
+a fix works already exists: `rules_hash` keeps rows from before and after a prompt
+edit out of the same average. That column was built before there was anything to
+use it on, and there now is.
 
 **A second, found by self-review before it could bite.** `run_judge` raised
 `JudgeError` after the call had been made and billed, and the exception carried no

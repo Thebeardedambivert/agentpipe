@@ -198,17 +198,57 @@ abstentions, 8 of 8 verdicts right for the right reason. At `--repeat 5`: 80 of 
 and `judge_stability` shows not one criterion where the judge gave two different
 answers.
 
-**That is not a win, and the plan said so before the run.** A perfect first result
-is evidence the constructed cases are too easy, not evidence the judge is good. The
-judge did beat both baits (a range check that validates correctly then returns a
-default anyway; correct code whose only error path is an implicit `KeyError`),
-which is more than a pattern-matcher manages. But an instrument that has never once
-disagreed with its calibration has not been calibrated. The dataset's next job is
-to acquire a case the judge gets wrong.
+**That was not a win, and the plan said so before the run.** A perfect first result
+is evidence the constructed cases are too easy, not evidence the judge is good. Two
+cheap checks then confirmed it:
 
-Report and view print counts, never rates: at eight cases one flipped verdict moves
-a percentage by double digits and still reads as a measurement. Nothing here is a
-pass mark, no threshold was introduced, and the gate's fail-open behaviour is
+- **External.** [JudgeBench](https://arxiv.org/pdf/2410.12784) (ICLR 2025) is the
+  standing benchmark for LLM judges and the best model on it scores **64%**.
+  Scoring 100%, far above the field's best, is a statement about the exam.
+- **Internal, for $0.001408.** Re-running with `gpt-5.4-nano` as judge also scored
+  **16 of 16**. A dataset that cannot separate a model from one 3.7x cheaper cannot
+  answer the routing question it was built for. The trap to avoid: "nano judges as
+  well as mini" is not a supported conclusion. The only supported conclusion is
+  that the dataset could not tell them apart.
+
+## The dataset was expanded to 14, and the judge failed
+
+Six new cases: three failure modes, each paired **buggy and fixed against one
+shared ticket**, so every pair is a controlled test of whether the judge can tell
+the two apart. The failure modes are documented outside this project rather than
+invented here (PEP 616 exists *because* programmers keep misusing `str.strip` as
+suffix removal; sort stability; binary floating point on money), and every claim in
+every label was verified by executing it. Two candidate claims were discarded at
+that step because running them showed they were false, which is the whole argument
+for verifying rather than recalling.
+
+**The finding is a false pass, the dangerous quadrant.** Given
+`sum(prices) == expected` and the criterion "amounts that are mathematically equal
+are reported as matching", `gpt-5.4-mini` answers **satisfied**, in **6 of 6
+samples** (`judge_stability`: `distinct_answers = 1`). Its reasons are five
+rewordings of one move:
+
+> "The function returns True when sum(prices) equals expected, covering
+> mathematically equal amounts."
+
+It restates the code and treats the restatement as proof. It never asks whether
+floating-point `==` means "mathematically equal", which it does not:
+`sum([0.1, 0.2]) == 0.3` is `False`. With `--gate` on, that patch reaches the
+working tree every time, and it is a money bug in a checkout reconciliation.
+`gpt-5.4-nano` shares the identical blind spot, which points at the prompt rather
+than the model.
+
+**And the dataset now discriminates.** On the six new cases mini disagrees on one
+criterion; nano disagrees on four (the same false pass, plus a false block on the
+*correct* stable sort, plus two abstentions). Verdict counts alone read 13 of 14
+for both and would call them equivalent. **Right-verdict-for-the-right-reason
+separates them, 13 to 11.** That is that metric earning its place: the judge's
+named criteria become the builder's instructions, so a right answer reached by
+wrong reasoning sends the builder to fix the wrong thing.
+
+Report and view print counts, never rates: at fourteen cases one flipped verdict
+still moves a percentage by several points and reads as a measurement. Nothing here
+is a pass mark, no threshold was introduced, and the gate's fail-open behaviour is
 unchanged. This stage measures; it does not tune.
 
 Layer 4 (event-sourced replay) and Layer 7 (Temporal) are the industrial layers:
@@ -245,15 +285,27 @@ and the span hardcodes `gen_ai.system = "openai"`, which would be a lie.
 
 Both of the Layer 0 gaps recorded in PLAN.md are now closed.
 
+**The judge has a known, stable blind spot, and nothing has been done about it
+yet. (Open.)** It reads an equality check and concludes the criterion about
+equality is met, without asking whether that check is correct. 6 of 6 samples on
+`gpt-5.4-mini`, and `gpt-5.4-nano` does the same. Deliberately left unfixed in this
+stage: changing `JUDGE_RULES` changes the gate's behaviour, and this stage measures
+rather than tunes. The machinery to prove a fix works now exists (`rules_hash`
+keeps before-and-after rows from averaging together), which is the point of having
+built it before needing it.
+
 **The eval dataset has no harvest path. (Open, and it is the one that matters.)**
 Cases are built by hand. `TASK-GATE` could not become a case at all because the
-run's files were never captured, so a real judge verdict from a real run is
-already unrecoverable. Five of the eight cases are constructed for that reason,
-and constructed cases were written by the same person who wrote the judge's
-prompt. Until a real disagreement can be turned into a case cheaply, the dataset
-grows in the direction of what we imagine rather than what happens. What would fix
-it: capture the judged files alongside the verdict, so `--gate` on a real ticket
-leaves behind everything a case needs.
+run's files were never captured, so a real judge verdict from a real run is already
+unrecoverable. Eleven of fourteen cases are `constructed`, and the provenance field
+has only two values, so a case whose failure mode is documented in the wild (PEP
+616, sort stability, float money) is recorded the same as one invented here. That
+understates the newer cases rather than overstating them, which is the safe
+direction, but the distinction is real and the field cannot express it. Until a
+real disagreement can be turned into a case cheaply, the dataset grows in the
+direction of what we imagine rather than what happens. What would fix it: capture
+the judged files alongside the verdict, so `--gate` on a real ticket leaves behind
+everything a case needs.
 
 **Spans go nowhere. (Closed.)** `trace_id` and `span_id` used to write as all
 zeros, because no tracer was configured and OTel's no-op default discarded every
