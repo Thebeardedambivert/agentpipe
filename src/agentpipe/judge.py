@@ -7,10 +7,14 @@ it meets the acceptance criteria that no exit code can verify: the semantic ones
 human wrote and only judgment can check ("rejects a negative length with a clear
 error", "the message is actionable").
 
-This is Layer 6 Stage 1, and it is only the sensor. It reads and reports; it does
-not gate. The gate that stops the run before the expensive review-and-fix stretch is
-Stage 2, held back until this is proven to read true, the same one-shot-before-loop
-discipline as Layer 2 before Layer 3 and the reviewer before the fixer.
+Built in three stages, and the order is the point. Stage 1 was the sensor alone:
+it read and reported and gated nothing, the same one-shot-before-loop discipline
+as Layer 2 before Layer 3 and the reviewer before the fixer. Stage 2 wired it into
+`loop.py` behind `--gate`, where a BLOCK sends the builder back to work. Stage 3
+(`evals.py`) measures whether it is right, because Stage 2 handed an unmeasured
+sensor authority over the builder and that is only defensible once someone checks.
+
+Standalone via `--judge` it is still advisory; only `--gate` acts on the verdict.
 
 It grades the ticket's check-less acceptance criteria, not a free-form "is this
 good" score (a decision made with the user). That keeps it grounded in what the
@@ -334,5 +338,5 @@ def report_judge(result: JudgeResult) -> str:
             lines.append(f"  [{v.outcome.value:<14}] {v.criterion}")
             lines.append(f"                   {v.reason}")
 
-    lines += ["", "advisory only. Nothing was gated; the gate arrives in Stage 2."]
+    lines += ["", "advisory only. Nothing was gated; use --gate to act on this."]
     return "\n".join(lines)
