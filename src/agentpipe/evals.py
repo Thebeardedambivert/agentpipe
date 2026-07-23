@@ -316,6 +316,30 @@ def load_cases(root: str | Path, only: Optional[str] = None) -> tuple[EvalCase, 
     return tuple(load_case(d) for d in dirs)
 
 
+# These repos live for milliseconds inside a temp directory and are then deleted.
+# Nothing that outlives them, or runs in the background, has any business starting
+# up for them.
+#
+# On Git for Windows a bare `git add` spawns `git fsmonitor--daemon run --detach
+# --ipc-threads=8`. Detached, by design long-lived, and it goes on watching a
+# directory we are about to delete. At forty git calls per command, repeated over
+# a session, that is a lot of orphaned daemons on a machine that then fell over.
+#
+# Measured, not assumed, because the first version of this got it wrong:
+#
+#   plain init + plain add          -> +1 daemon
+#   hardened init + PLAIN add       -> +1 daemon   (hardening init alone does nothing)
+#   hardened init + hardened add    -> +0 daemons
+#
+# So the flags go on EVERY invocation. `-c` before the subcommand, not after.
+_GIT = [
+    "git",
+    "-c", "core.fsmonitor=false",     # no detached watcher daemon
+    "-c", "gc.auto=0",                # no background garbage collection
+    "-c", "maintenance.auto=false",   # no background maintenance
+]
+
+
 def materialise(case: EvalCase, dest: str | Path) -> Repo:
     """Lay a case's code out as a real git repository the judge can read.
 
@@ -327,9 +351,9 @@ def materialise(case: EvalCase, dest: str | Path) -> Repo:
     d = Path(dest)
     d.mkdir(parents=True, exist_ok=True)
     shutil.copytree(case.code_dir, d, dirs_exist_ok=True)
-    subprocess.run(["git", "init", "-q"], cwd=d, check=True,
+    subprocess.run(_GIT + ["init", "-q"], cwd=d, check=True,
                    capture_output=True, text=True)
-    subprocess.run(["git", "add", "-A"], cwd=d, check=True,
+    subprocess.run(_GIT + ["add", "-A"], cwd=d, check=True,
                    capture_output=True, text=True)
     return Repo(d)
 
@@ -691,26 +715,40 @@ def report_evals(run: EvalRun) -> str:
     return "\n".join(lines)
 
 
-def report_dataset(cases: tuple[EvalCase, ...]) -> str:
-    """What the dataset holds, and what grading it would cost in tokens.
+def report_dataset(cases: tuple[EvalCase, ...], with_tokens: bool = False) -> str:
+    """What the dataset holds, and optionally what grading it would cost in tokens.
 
     The --dry-run output. Every validation a case can fail has already run by the
     time this prints, so a clean dry run means the dataset is loadable, complete,
-    and its labels still match its tickets. Free, and it catches the drift that
-    would otherwise be discovered as a wrong number after the spend.
+    and its labels still match its tickets. That part is pure file reading and
+    costs nothing.
+
+    `with_tokens` is off by default, and that default was paid for. Estimating
+    tokens means materialising every case, and materialising means a real `git
+    init` plus `git add` per case: 40 subprocesses for a twenty-case dataset, on
+    the command people run most often and expect to be free. Repeated runs left
+    orphaned git processes on a Windows dev machine and helped take the box down.
+
+    The lesson is not "avoid subprocesses". It is that an optional extra was
+    welded onto the cheap path, so everyone paid for it whether or not they wanted
+    it. Validation is the job here; the token estimate is a bonus, and bonuses opt
+    in. Same shape as the test that grew slower with every case added: one
+    decision, two symptoms.
     """
     lines = [f"dataset      {len(cases)} cases", ""]
     total = 0
     for case in cases:
-        with tempfile.TemporaryDirectory(prefix=f"agentpipe-dry-{case.name}-") as tmp:
-            repo = materialise(case, tmp)
-            pack = build_judge_pack(case.ticket, repo, case.files, case.criteria)
-        total += pack.tokens
+        pack = None
+        if with_tokens:
+            with tempfile.TemporaryDirectory(prefix=f"agentpipe-dry-{case.name}-") as tmp:
+                repo = materialise(case, tmp)
+                pack = build_judge_pack(case.ticket, repo, case.files, case.criteria)
+            total += pack.tokens
         lines.append(
             f"  {case.name:<26} {case.provenance:<12} "
             f"{len(case.criteria)} criteria  "
-            f"expect {case.expected_verdict.value.upper():<5} "
-            f"~{pack.tokens:,} tokens"
+            f"expect {case.expected_verdict.value.upper():<5}"
+            + (f" ~{pack.tokens:,} tokens" if pack else "")
         )
         # First sentence only. The full note lives in case.json and is meant to be
         # read there; a wall of wrapped prose here buries the numbers next to it.
@@ -721,10 +759,13 @@ def report_dataset(cases: tuple[EvalCase, ...]) -> str:
             lines.append(f"      {gist}.")
 
     real = sum(1 for c in cases if c.provenance == "real")
+    lines += ["", f"  {real} real, {len(cases) - real} constructed"]
+    if with_tokens:
+        lines.append(f"  ~{total:,} input tokens per sample, before the reply")
+    else:
+        lines.append("  (pass --tokens to estimate pack size; it materialises "
+                     "every case, so it is not free)")
     lines += [
-        "",
-        f"  {real} real, {len(cases) - real} constructed",
-        f"  ~{total:,} input tokens per sample, before the reply",
         "",
         "Validated: every case loads, every label covers its criterion exactly",
         "once, and every label's text still matches its ticket. Nothing was called.",
@@ -750,8 +791,12 @@ def main() -> int:
                          "so it is a new paid call, not a replay. Default 1: "
                          "repeats cost real money and only stability needs them.")
     ap.add_argument("--dry-run", action="store_true",
-                    help="load and validate the dataset, print what grading would "
-                         "cost, call nothing and record nothing")
+                    help="load and validate the dataset, call nothing, record "
+                         "nothing, and spawn nothing")
+    ap.add_argument("--tokens", action="store_true",
+                    help="with --dry-run, also estimate each pack's size. Off by "
+                         "default because it materialises every case, which is a "
+                         "git init and a git add per case.")
     ap.add_argument("--no-record", action="store_true",
                     help="print the report but do not write judge_evals")
     args = ap.parse_args()
@@ -768,7 +813,7 @@ def main() -> int:
 
     if args.dry_run:
         print()
-        print(report_dataset(cases))
+        print(report_dataset(cases, with_tokens=args.tokens))
         print()
         return 0
 

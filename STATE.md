@@ -285,6 +285,96 @@ and the span hardcodes `gen_ai.system = "openai"`, which would be a lie.
 
 Both of the Layer 0 gaps recorded in PLAN.md are now closed.
 
+**The ratio metric hides the cost of a whole-file rewrite, and on real files the
+bill is dominated by output. (Open. Arithmetic, not yet observed.)**
+
+`pack.RULES` asks the model for "the complete new contents of each file you
+change". So output tokens scale with **file size, not change size**, and output is
+priced roughly 6x input. Measured against a real repository (`boltons`, 112 files,
+cloned to a scratch dir; `estimate_tokens`, so a rule of thumb rather than a
+tokeniser), a **one line** fix to `boltons/urlutils.py`:
+
+```
+input   14,541 tokens   $0.0113
+output  14,382 tokens   $0.0647     5.7x the input cost
+```
+
+Now put that beside the number this project was founded on:
+
+| | ratio | cost |
+|---|---|---|
+| Andrew's 70,000 in / 100 out | 700, reads as terrible | ~$0.053 |
+| the one-line urlutils fix | 1.0, reads as ideal | **$0.078** |
+
+**The healthy-looking ratio costs more.** `ratio` measures shape, not money. A low
+ratio can mean "a small focused change" or "the model regurgitated a 1,600 line
+file", and nothing in `ratio_by_role` distinguishes them. Every number in the
+baseline above was taken on files small enough that the two never diverged, so the
+metric has never yet been in a position to mislead. On real code it is.
+
+Consequences worth stating:
+- `avg_output` and `ratio` in `ratio_by_role` should be read next to file size, not
+  on their own. A rate column would make this worse, not better.
+- The single biggest cost lever on a real repo is probably not context trimming at
+  all, it is a patch format whose output scales with the change. A diff or
+  search/replace format is the fix, and it is a real architectural change with its
+  own parser and its own failure modes, not a tweak.
+- Truncation becomes a live risk, not a theoretical one: a 14,382 token reply must
+  be emitted perfectly, and `finish_reason='length'` is already a documented
+  failure mode here.
+
+Found by arithmetic before any spend, which is the cheapest kind of finding.
+Replace these projections with measured numbers once a large ticket has actually
+run.
+
+**The test suite used to leave background git daemons behind. (Closed, and it
+took a machine down first.)**
+
+Most fixtures build a real git repository in a temp directory, because this
+project refuses doubles that can drift from the real thing. That decision is
+right and stays. What went unnoticed is its cost on Windows: `git add` spawns
+`git fsmonitor--daemon run --detach --ipc-threads=8`, which is detached,
+long-lived by design, and carries on watching a directory pytest then deletes.
+With 18 git call sites across 8 test files, plus `evals.materialise` doing an
+init and an add per case (40 subprocesses for a twenty-case `--dry-run`), a
+session leaves a crowd of them behind. Cyril's machine crashed during one.
+
+Closed in two places, both measured rather than assumed:
+
+- `tests/conftest.py` sets `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` /
+  `GIT_CONFIG_VALUE_n` in the environment, which git applies to every invocation
+  and subprocesses inherit. One file covers all 18 call sites and any added later.
+- `evals.materialise` passes the same flags to both its git calls.
+
+The first attempt hardened `git init` only and did nothing, which the measurement
+caught:
+
+```
+plain init + plain add          +1 daemon
+hardened init + PLAIN add       +1 daemon      <- the fix that did not fix
+hardened init + hardened add    +0 daemons
+```
+
+Verified after: 58 tests across the git-heaviest files, daemon count 2 before and
+2 after.
+
+Two lessons worth keeping. First, `--dry-run` was materialising every case purely
+to estimate tokens, so a command people run constantly and expect to be free was
+spawning 40 subprocesses; token estimation is now behind `--tokens`. An optional
+extra welded onto the cheap path gets paid for by everyone. Second, this is the
+same root as the test that grew slower with every case added: one decision
+(materialise per case) with two symptoms, and the first symptom was patched
+without asking what caused it.
+
+**Cacheable prefix depends on path lengths, which nobody would predict.**
+`RULES` + the file tree is the only guaranteed-stable prefix across retries.
+On agentpipe that is 159 + 982 = 1,141 tokens, above the ~1,024 threshold. On
+boltons it is 159 + 587 = 746, **below** it, because boltons uses short paths
+(`boltons/urlutils.py`) where agentpipe uses long ones (`src/agentpipe/...`). Same
+design, same file count, opposite caching behaviour. Beyond the tree, the cache
+also covers any selected file that precedes the first one the model edits, so the
+order of a ticket's `Files:` section decides how much stays cached. Untested.
+
 **The judge has a known, stable blind spot. The obvious fix was tried and did not
 work. (Open.)** It reads an equality check and concludes the criterion about
 equality is met, without asking whether that check is correct. 6 of 6 samples on
