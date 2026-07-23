@@ -1,0 +1,19 @@
+{
+  "provenance": "constructed",
+  "note": "Sibling 3 of 3 in the 'nearly-right operation' family. Here the nearly-right operation is sorted() on text, which orders by character code, so every capitalised name sorts before every lowercase one. It is alphabetical in the machine's sense and not in the reader's. Every claim below was verified by running it.",
+  "files": ["contacts.py"],
+  "labels": [
+    {
+      "criterion": 0,
+      "text": "names are ordered alphabetically regardless of how they are capitalised",
+      "expect": "not_satisfied",
+      "why": "verified: sort_names(['apple', 'Banana', 'cherry']) returns ['Banana', 'apple', 'cherry']. Uppercase letters have lower character codes than lowercase, so Banana jumps to the front. Note it passes on all-lowercase input: ['b','a','c'] sorts to ['a','b','c'], so a test written that way is green."
+    },
+    {
+      "criterion": 1,
+      "text": "the returned list contains exactly the names that were given",
+      "expect": "satisfied",
+      "why": "verified: sorted() reorders without adding, dropping or altering anything. Only the order is wrong, not the contents."
+    }
+  ]
+}

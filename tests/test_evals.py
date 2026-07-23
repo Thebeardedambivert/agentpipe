@@ -572,5 +572,17 @@ def test_the_shipped_dataset_loads_and_is_labelled_consistently():
     passes = len(cases) - blocks
     assert blocks >= 2 and passes >= 2
 
-    # Free, and it exercises the same path --dry-run uses.
-    assert "cases" in report_dataset(cases)
+    # Exercise the --dry-run path, but on a slice, NOT on the whole dataset.
+    #
+    # report_dataset materialises every case it is given, and materialising is a
+    # real `git init` plus `git add` per case. This line originally ran over all
+    # of them with the comment "free". It was not free: it was the most expensive
+    # line in the file, and its cost grew every time a case was added. At eight
+    # cases the file ran in 8 seconds; at twenty it went past three minutes on a
+    # Windows box where Defender scans each new repo.
+    #
+    # The shape of the mistake matters more than the seconds. A test whose cost
+    # scales with the dataset taxes the exact behaviour this dataset needs, which
+    # is people adding cases to it. Two cases prove the function works; twenty
+    # prove it twenty times and charge for the privilege.
+    assert "cases" in report_dataset(cases[:2])

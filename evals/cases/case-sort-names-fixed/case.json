@@ -1,0 +1,19 @@
+{
+  "provenance": "constructed",
+  "note": "The correct half of the name-sorting pair. Sorting on the case-folded form compares letters rather than character codes, while the list still holds the names as they were typed. Every claim below was verified by running it.",
+  "files": ["contacts.py"],
+  "labels": [
+    {
+      "criterion": 0,
+      "text": "names are ordered alphabetically regardless of how they are capitalised",
+      "expect": "satisfied",
+      "why": "verified: sort_names(['apple', 'Banana', 'cherry']) returns ['apple', 'Banana', 'cherry']. The key folds case for the comparison only."
+    },
+    {
+      "criterion": 1,
+      "text": "the returned list contains exactly the names that were given",
+      "expect": "satisfied",
+      "why": "verified: the key affects ordering, not the values, so the names come back exactly as they were typed."
+    }
+  ]
+}

@@ -227,6 +227,76 @@ Two smaller things the experiment established, worth keeping:
 gate's behaviour is unchanged by this stage. The blind spot is open and recorded in
 STATE.md.
 
+## Stage 3d: the blind spot is narrower than it looked
+
+Before tuning anything further, the dataset was pushed from 14 cases to 20 to find
+out whether the float failure was one instance of a family. It is not.
+
+**The hypothesis, stated before the run:** the judge accepts "a nearly-right
+operation" as correct. Three siblings were built to test it, each a matched
+buggy/fixed pair, each claim verified by execution:
+
+- `[total // people] * people`, which silently drops the remainder and loses a penny
+- `a == b` on email, which treats one person as two accounts
+- `sorted(names)`, which orders by character code so `Banana` precedes `apple`
+
+**The judge got all six right, stably (3 of 3 samples each). The hypothesis is
+disconfirmed for $0.0086.**
+
+**What the pattern actually is.** The difference is not the kind of operation. It is
+whether the defect is *in the text at all*:
+
+| code | defect visible by reading? | judge |
+|---|---|---|
+| `[total // people] * people` | yes, `//` visibly discards the remainder | correct |
+| `a == b` on email | yes, visibly no normalisation | correct |
+| `sorted(names)` | yes, visibly no key | correct |
+| `sum(prices) == expected` | **no. The text is correct code.** | **wrong** |
+
+`sum(prices) == expected` is right for integers, for `Decimal`, for `Fraction`. It
+is wrong only because of how binary floating point represents decimals, and that
+fact appears nowhere in the source. **The judge fails when catching the defect
+requires knowing runtime behaviour rather than reading the code.**
+
+**This also explains why the prompt fix failed.** Instructed to trace a concrete
+input, the judge picked `1, 2, 3`. That read as laziness. It was not: for those
+values the code genuinely is correct. It answered correctly the only question
+reading can ask. So further prompt attempts should be expected to fail for a
+principled reason, not a wording one, which is worth knowing before paying for
+attempts two, three and four. It is the argument for letting the judge *run* code
+rather than reason about it: a defect that is not written down cannot be read.
+
+**The two screens, now measured rather than predicted.** Both were chosen to make
+hunting cheaper, and both have the same limit:
+
+- **Cheap-model disagreement** flagged four disagreements between mini and nano. In
+  all four, mini was right and nano wrong, so it found "cases nano struggles with",
+  which is a model-selection signal. It missed the one case mini fails, because
+  both models agree there.
+- **Stability** found nothing unstable. But `float-money-buggy` is perfectly stable
+  and wrong (6 of 6 identical answers) while the new cases are perfectly stable and
+  right (3 of 3).
+
+**Both measure confidence. Neither measures correctness.** A confidently wrong
+judge is exactly the dangerous case, so these are useful for comparing models and
+cannot be the way blind spots are found.
+
+**A caveat on the label itself**, recorded rather than hidden: `float-money-buggy`
+is the most contestable case in the set. One could argue `sum([0.1, 0.2])` really
+is not equal to `0.3` as stored values, so `==` reports correctly. The label stands
+because the criterion speaks about amounts as a user means them, but it is the
+least clear-cut of the twenty and that ambiguity may be part of why the judge trips.
+
+**A test that punished the thing it exists to encourage.** The shipped-dataset test
+ended with `report_dataset(cases)` over the whole dataset, commented "free". It was
+not: `report_dataset` materialises every case, and materialising is a real
+`git init` plus `git add`. At eight cases the file ran in 8 seconds; at twenty it
+passed three minutes on a machine where Defender scans each new repo. The cost grew
+with every case added, which taxes the exact behaviour an eval dataset needs. Fixed
+by reporting over a two-case slice: 5.26 seconds. The comment claiming it was free
+was written without measuring, which is the same error as everything else this
+stage caught.
+
 **A second, found by self-review before it could bite.** `run_judge` raised
 `JudgeError` after the call had been made and billed, and the exception carried no
 record, so an unusable reply was reported as a free sample. That makes the most

@@ -1,0 +1,19 @@
+{
+  "provenance": "constructed",
+  "note": "Sibling 1 of 3, built to test whether the float-money blind spot is a one-off or a family: 'the code uses a nearly-right operation, and the judge accepts nearly as exactly'. Here the nearly-right operation is floor division, which silently drops the remainder. Aimed deliberately at a known weakness rather than hunted at random. Every claim below was verified by running it.",
+  "files": ["split.py"],
+  "labels": [
+    {
+      "criterion": 0,
+      "text": "the amounts always add up to exactly the total",
+      "expect": "not_satisfied",
+      "why": "verified: split_bill(100, 3) returns [33, 33, 33], which sums to 99. A penny vanishes on every bill that does not divide evenly. Note it passes the obvious test: split_bill(90, 3) sums to exactly 90, so a test written with round numbers is green."
+    },
+    {
+      "criterion": 1,
+      "text": "no two people are asked for amounts differing by more than one penny",
+      "expect": "satisfied",
+      "why": "verified: every amount is identical, so the largest difference is 0. This criterion genuinely is met, and it is what makes the code look reasonable."
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "provenance": "constructed",
+  "note": "Sibling 2 of 3 in the 'nearly-right operation' family. Here the nearly-right operation is == on text, which is exact byte comparison where the criterion asks for something looser. Email domains are case-insensitive in practice and most providers treat the local part that way too, which is why sign-in flows normalise before comparing. Every claim below was verified by running it.",
+  "files": ["accounts.py"],
+  "labels": [
+    {
+      "criterion": 0,
+      "text": "addresses differing only in capitalisation are treated as the same account",
+      "expect": "not_satisfied",
+      "why": "verified: same_account('Bob@Example.com', 'bob@example.com') returns False, so the same person signing in with a capitalised address is treated as a stranger and a duplicate account is created. Note it passes when both are already lowercase, so a test using one spelling is green."
+    },
+    {
+      "criterion": 1,
+      "text": "genuinely different addresses are treated as different accounts",
+      "expect": "satisfied",
+      "why": "verified: same_account('bob@example.com', 'alice@example.com') returns False. Rejecting genuinely different addresses works; only the equivalence case is broken."
+    }
+  ]
+}

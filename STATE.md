@@ -314,6 +314,37 @@ hand is how a prompt ends up tuned to fourteen cases with no record of the cost.
 Reverting was free, since every answer under the old hash is cached; re-running
 reproduced the baseline exactly at $0 billed.
 
+**The blind spot is narrower than it first looked, and the shape of it matters.**
+The dataset was pushed to 20 cases to test whether the float failure was one member
+of a family ("the judge accepts a nearly-right operation"). Three siblings, each a
+matched buggy/fixed pair: floor division losing a penny, `==` on email missing
+capitalisation, `sorted()` ordering by character code. **The judge got all six
+right, stably. The hypothesis is disconfirmed, for $0.0086.**
+
+The real pattern is not the kind of operation, it is whether the defect exists in
+the text. `[total // people] * people` visibly discards a remainder; `a == b`
+visibly lacks normalisation; `sorted(names)` visibly lacks a key. But
+`sum(prices) == expected` **is correct code** for integers, `Decimal` and
+`Fraction`. It is wrong only because of how binary floating point stores decimals,
+and that fact is nowhere in the source. **The judge fails when catching the defect
+requires knowing runtime behaviour rather than reading the code.**
+
+That also explains the failed prompt fix: told to trace a concrete input it chose
+`1, 2, 3`, which read as laziness but was not. For those values the code genuinely
+is correct. It answered the only question reading can ask. Further prompt attempts
+should therefore be expected to fail for a principled reason, which is worth
+knowing before paying for attempts two through four, and it is the argument for
+letting the judge *run* code rather than reason about it.
+
+**Both cheap screening methods were measured, and both have the same limit.**
+Cheap-model disagreement flagged four cases; in all four mini was right and nano
+wrong, so it is a model-selection signal, and it missed the one case mini fails
+because both models agree there. Stability found nothing unstable, yet
+`float-money-buggy` is perfectly stable and wrong (6 of 6) while the new cases are
+perfectly stable and right (3 of 3). **Both measure confidence, neither measures
+correctness**, and a confidently wrong judge is the dangerous case. Useful for
+comparing models; useless for finding blind spots.
+
 **The eval dataset has no harvest path. (Open, and it is the one that matters.)**
 Cases are built by hand. `TASK-GATE` could not become a case at all because the
 run's files were never captured, so a real judge verdict from a real run is already
