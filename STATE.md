@@ -28,6 +28,7 @@ judge.py       the eval gate: grade check-less acceptance criteria, three-state
 loop.py (gate) --gate makes the judge a second gate in the loop, blocks rebuild
 evals.py       the dataset that grades the judge. Labelled cases in, matrix out
 evalstore.py   the accuracy port: record what the judge said vs what was labelled
+characterise.py the L4 sensor: run the suite before and after, diff the behaviour
 run.py         CLI. --max-attempts loops, --review, --fix, --judge, --gate
 preflight.py   four checks before you trust any number
 ```
@@ -563,10 +564,40 @@ thing that caught it was a human reading the diff.
 **That is the L4 rung having no automated check behind it.** Validation cannot see
 it (the tests pass), the acceptance check cannot see it (it asks about the bug,
 not about everything else), and the judge reads code rather than running it, which
-is exactly the blind spot Stage 3d diagnosed. The cheapest thing that would have
-caught it is a characterisation check: snapshot the touched module's behaviour
-before, compare after, and report a difference nobody asked for. It needs no
-foresight about what to test, which is precisely why it works here.
+is exactly the blind spot Stage 3d diagnosed.
+
+**Closed the same day: `characterise.py`, opt-in via `--characterise`.** Run the
+ticket's validation suite twice, before the patch and after, recording what the
+touched modules were called with and what they returned, then diff. A difference
+the ticket did not ask for is the finding.
+
+The design is small because of one free measurement taken before writing anything.
+The plan had been to generate inputs, or to record calls and replay them against
+the patched code. Instrumenting funcy's suite showed it **already** calls
+`get_spec` 32 times, 6 of them with a class, including the exact call whose answer
+the patch changed. The inputs did not need inventing; they were already being
+supplied by the suite that then reported success. So there is no generation, no
+replay, no pickling: record the same suite twice and compare.
+
+Proven on the real repository rather than on a fixture: 164 calls recorded either
+side of agentpipe's own funcy patch, exactly one difference reported, no noise.
+
+Two limits, stated rather than discovered later. It sees only what the suite
+already exercises, so it is a floor and not a proof. And it cannot tell a wanted
+change from an unwanted one, because the ticket asked for *some* behaviour to
+change; deciding which difference is the point is still a human's job.
+
+**Its own first live run gave a false all-clear, which is the lesson in
+miniature.** The ticket's validation is a bare `pytest -q`, which does not put the
+repository on `sys.path` where `python -m pytest` does, so the plugin's import of
+`funcy._inspect` failed, the failure was swallowed by a `continue`, and the report
+read `no behaviour changed across 0 recorded calls`. A sensor announcing all-clear
+while switched off is worse than no sensor. The plugin now puts the rootdir on
+`sys.path` itself, records which modules it failed to watch, and `record()` raises
+rather than returning an empty snapshot in both the nothing-watched and
+nothing-recorded cases. `PYTHONHASHSEED` is pinned for the same family of reason:
+set reprs otherwise order differently between processes and manufacture
+differences that are not real.
 
 **Where the pipeline actually breaks, now that there is more than one datapoint.**
 L0 and L1 held in all three cases, including a two-file reply, the first this
