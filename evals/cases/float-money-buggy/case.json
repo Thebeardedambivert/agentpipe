@@ -1,0 +1,19 @@
+{
+  "provenance": "constructed",
+  "note": "Binary floating point cannot represent most decimal fractions, so comparing money with == fails on ordinary prices. Documented in the Python tutorial's Floating Point Arithmetic appendix and the reason CLAUDE.md requires Decimal for cost in this very project. The code was written minimally to exhibit it. Paired with float-money-fixed. Every claim below was verified by running it.",
+  "files": ["totals.py"],
+  "labels": [
+    {
+      "criterion": 0,
+      "text": "amounts that are mathematically equal are reported as matching",
+      "expect": "not_satisfied",
+      "why": "verified: totals_match([0.1, 0.2], 0.3) returns False, because 0.1 + 0.2 is 0.30000000000000004 in binary floating point. A customer whose basket adds up correctly is told it does not. Note it passes on exact binary fractions: totals_match([0.5, 0.25], 0.75) is True, so a test written with those values is green."
+    },
+    {
+      "criterion": 1,
+      "text": "amounts that genuinely differ are reported as not matching",
+      "expect": "satisfied",
+      "why": "verified: totals_match([1.0, 2.0], 5.0) returns False. Rejecting genuinely wrong totals does work; it is only the equal case that is broken."
+    }
+  ]
+}

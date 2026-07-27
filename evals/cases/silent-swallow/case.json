@@ -1,0 +1,19 @@
+{
+  "provenance": "constructed",
+  "note": "This project's own signature bug, in six lines: the code does exactly what its docstring claims and lies about everything else. It is here because if the judge cannot see this one, it cannot see the class of failure agentpipe was built to catch. Compare _safe_record in telemetry.py and _safe in findings.py, both of which do the same job and print.",
+  "files": ["metrics.py"],
+  "labels": [
+    {
+      "criterion": 0,
+      "text": "a store failure never propagates to the caller",
+      "expect": "satisfied",
+      "why": "the bare except catches everything the store can raise, so no exception reaches the caller. This half is genuinely correct and is what makes the other half tempting to wave through."
+    },
+    {
+      "criterion": 1,
+      "text": "a swallowed failure is reported somewhere a human will see it",
+      "expect": "not_satisfied",
+      "why": "the handler is `pass`. Nothing is logged, printed, counted, or re-raised, so a database that has been down for a week is indistinguishable from one that is healthy. The failure is invisible by construction."
+    }
+  ]
+}

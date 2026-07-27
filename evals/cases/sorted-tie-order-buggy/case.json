@@ -1,0 +1,19 @@
+{
+  "provenance": "constructed",
+  "note": "A real and widely made mistake: assuming sorted(reverse=True) is the same as reversing the sorted list. It is not, because Python's sort is stable, so reversing also reverses the tied runs. Documented in the CPython sorting docs as the reason reverse=True exists at all. The code was written minimally to exhibit it, so provenance stays 'constructed'. Paired with sorted-tie-order-fixed. Every claim below was verified by running it.",
+  "files": ["leaderboard.py"],
+  "labels": [
+    {
+      "criterion": 0,
+      "text": "players are ordered from the highest score to the lowest",
+      "expect": "satisfied",
+      "why": "verified: [('alice',3),('bob',3),('carol',1)] comes back with scores [3,3,1]. The descending order really is correct, which is the half that makes the bug survive review."
+    },
+    {
+      "criterion": 1,
+      "text": "players with equal scores keep the order they were given in",
+      "expect": "not_satisfied",
+      "why": "reversing a stable sort also reverses the tied group. Verified: alice and bob are both on 3 and were given in that order, but the result is ['bob', 'alice', 'carol']. Alice is silently demoted below bob for no reason a player could see."
+    }
+  ]
+}

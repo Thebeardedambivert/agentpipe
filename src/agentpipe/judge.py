@@ -7,10 +7,14 @@ it meets the acceptance criteria that no exit code can verify: the semantic ones
 human wrote and only judgment can check ("rejects a negative length with a clear
 error", "the message is actionable").
 
-This is Layer 6 Stage 1, and it is only the sensor. It reads and reports; it does
-not gate. The gate that stops the run before the expensive review-and-fix stretch is
-Stage 2, held back until this is proven to read true, the same one-shot-before-loop
-discipline as Layer 2 before Layer 3 and the reviewer before the fixer.
+Built in three stages, and the order is the point. Stage 1 was the sensor alone:
+it read and reported and gated nothing, the same one-shot-before-loop discipline
+as Layer 2 before Layer 3 and the reviewer before the fixer. Stage 2 wired it into
+`loop.py` behind `--gate`, where a BLOCK sends the builder back to work. Stage 3
+(`evals.py`) measures whether it is right, because Stage 2 handed an unmeasured
+sensor authority over the builder and that is only defensible once someone checks.
+
+Standalone via `--judge` it is still advisory; only `--gate` acts on the verdict.
 
 It grades the ticket's check-less acceptance criteria, not a free-form "is this
 good" score (a decision made with the user). That keeps it grounded in what the
@@ -26,6 +30,7 @@ parse ourselves, so prose is refused and the provider switch stays a config chan
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -77,6 +82,18 @@ Reply with only this block, and nothing else:
 Return exactly one entry per criterion, using the criterion's number. outcome is one of: satisfied, not_satisfied, uncertain. No prose, no markdown fences, nothing outside the block."""
 
 
+def rules_hash() -> str:
+    """Identity of the prompt this judge is running.
+
+    Lives next to JUDGE_RULES so it cannot drift from the text it hashes. Layer 6
+    Stage 3 records it with every graded criterion, because an accuracy number is
+    only comparable to another one produced by the same prompt. Averaging rows from
+    before and after a JUDGE_RULES edit would produce a number that describes no
+    judge that ever existed, which is this project's favourite kind of lie.
+    """
+    return hashlib.sha256(JUDGE_RULES.encode("utf-8")).hexdigest()[:16]
+
+
 _VERDICT_BLOCK = re.compile(
     r"^--- verdict\s*\n(?P<body>.*?)^--- end\s*$",
     re.MULTILINE | re.DOTALL,
@@ -84,7 +101,19 @@ _VERDICT_BLOCK = re.compile(
 
 
 class JudgeError(Exception):
-    """The judge's reply could not be turned into a verdict we trust."""
+    """The judge's reply could not be turned into a verdict we trust.
+
+    Carries the call that produced it, when there was one. The reply was unusable
+    but the call was still made and still billed, and an exception that drops that
+    fact makes the spend invisible to every caller that catches it. The eval
+    harness reports it as cost; run.py tells the human to go and look. Optional
+    because a JudgeError can also be raised by parse_verdict alone, on text that
+    never came from a call.
+    """
+
+    def __init__(self, message: str, record: Optional[CallRecord] = None) -> None:
+        super().__init__(message)
+        self.record = record
 
 
 @dataclass(frozen=True)
@@ -219,6 +248,8 @@ def run_judge(
     client: MeteredClient,
     model: str,
     files: tuple[str, ...],
+    attempt_index: int = 0,
+    task_ref: Optional[str] = None,
 ) -> JudgeResult:
     """Judge the produced code against the ticket's check-less acceptance criteria.
 
@@ -226,6 +257,21 @@ def run_judge(
     made. Saying so out loud is the point, the same honesty as the unguarded
     staleness gate. A gate that silently does nothing is the trap this project
     refuses.
+
+    Two parameters exist for Layer 6 Stage 3 and default to today's behaviour, so
+    every existing caller is unchanged:
+
+    `attempt_index` is in the idempotency key, so distinct values are distinct paid
+    calls rather than cache replays. The eval harness uses it as a *sample* number
+    to draw independent judgments of the same case. Note the overload, deliberately,
+    because a field whose meaning depends on context is a future bug: everywhere
+    else in this codebase attempt_index means "which retry".
+
+    `task_ref` overrides the ticket's own ref in the ledger. The eval harness tags
+    its calls `EVAL/<case>` so eval spend is unmistakable in model_calls rather than
+    masquerading as a production judgment of the same ticket. It also keeps the two
+    from colliding on one idempotency key: judging a case is genuinely different
+    work from judging the run that produced it.
     """
     criteria = tuple(c.text for c in ticket.acceptance if not c.check)
     if not criteria:
@@ -243,10 +289,15 @@ def run_judge(
         model=model,
         role="judge",
         attempt_kind="eval",
-        attempt_index=0,
-        task_ref=ticket.ref,
+        attempt_index=attempt_index,
+        task_ref=task_ref or ticket.ref,
     )
-    verdicts = parse_verdict(record.content, criteria)
+    try:
+        verdicts = parse_verdict(record.content, criteria)
+    except JudgeError as exc:
+        # Re-raise carrying the call, so whoever catches this can still account for
+        # what it cost. The verdict is lost; the money is not.
+        raise JudgeError(str(exc), record=record) from exc
     verdict = (
         JudgeVerdict.PASS
         if all(v.outcome is CriterionOutcome.SATISFIED for v in verdicts)
@@ -287,5 +338,5 @@ def report_judge(result: JudgeResult) -> str:
             lines.append(f"  [{v.outcome.value:<14}] {v.criterion}")
             lines.append(f"                   {v.reason}")
 
-    lines += ["", "advisory only. Nothing was gated; the gate arrives in Stage 2."]
+    lines += ["", "advisory only. Nothing was gated; use --gate to act on this."]
     return "\n".join(lines)

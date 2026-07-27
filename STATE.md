@@ -1,15 +1,15 @@
 # STATE
 
-Where this actually is, as of 18 July 2026. Read after CLAUDE.md and PLAN.md.
+Where this actually is, as of 23 July 2026. Read after CLAUDE.md and PLAN.md.
 
 CLAUDE.md is the rules. PLAN.md is the design. This is the situation.
 
 ## Built
 
 Layers 0, 1, 2, 3, Layer 5 complete (reviewer, fixer loop, audit table), and Layer 6
-Stages 1 and 2 (the judge, and the judge as a gate). 196 tests, all passing under
-the bare `pytest` CI runs. CI (`.github/workflows/ci.yml`) runs the suite against a
-real Postgres on every push.
+complete (the judge, the judge as a gate, and the eval dataset that measures it).
+237 tests, all passing under the bare `pytest` CI runs. CI
+(`.github/workflows/ci.yml`) runs the suite against a real Postgres on every push.
 
 ```
 telemetry.py   the seam. Every model call goes through MeteredClient.call()
@@ -26,6 +26,8 @@ config.py      ModelMap: which model each role uses, defaults to the base model
 findings.py    the audit port: record findings and outcomes to review_findings
 judge.py       the eval gate: grade check-less acceptance criteria, three-state
 loop.py (gate) --gate makes the judge a second gate in the loop, blocks rebuild
+evals.py       the dataset that grades the judge. Labelled cases in, matrix out
+evalstore.py   the accuracy port: record what the judge said vs what was labelled
 run.py         CLI. --max-attempts loops, --review, --fix, --judge, --gate
 preflight.py   four checks before you trust any number
 ```
@@ -68,6 +70,14 @@ have. Was not the fix it was sold as.
 
 ## Next, in order
 
+**0. Proven on a real third-party codebase. (Done, 23 July 2026, and it failed
+informatively.)** `mahmoud/boltons`, real open issue #301, one attempt on
+`gpt-5.4-mini`. agentpipe refused the patch; applying it by hand showed 445/445
+tests green, the bug still unfixed, and the BSD licence silently edited. See
+"the whole-file rule" under Known gaps. This is the first evidence about how the
+pipeline behaves on code it did not grow up with, and the answer is: the patch
+format is the weak point, not the context builder.
+
 **1. Proven end-to-end on real work. (Done, 18 July 2026.)**
 The pipeline ran a real ticket start to finish on `gpt-5.4-mini`: TASK-TRUNCATE,
 implement `truncate(text, length)` on a scratch repo. Result: PASSED in 1 attempt,
@@ -101,10 +111,10 @@ Still open, and deliberately so:
 - Trust boundary: checks run with your privileges. Fine while you author your own
   tickets, needs a sandbox the day they come from anywhere you do not control.
 
-**3. Layer 5 is complete and Layer 6 Stages 1 and 2 (judge, then judge-as-gate) are
-built. Next is Layer 6 Stage 3 (the eval dataset).** The loop, crash-safe resume,
-and the tracing tree are done; the cache claim is proven (92%, above the
-~1,024-token threshold; see the baseline).
+**3. Layer 5 and Layer 6 are both complete. Next is Layer 4 or Layer 7, the two
+industrial layers, and neither is urgent.** The loop, crash-safe resume, and the
+tracing tree are done; the cache claim is proven (92%, above the ~1,024-token
+threshold; see the baseline).
 
 Layer 5 is staged (see `plans/layer5.md`): Stage 1 the reviewer, Stage 2 the
 fixer loop plus model routing, Stage 3 the audit table.
@@ -167,8 +177,87 @@ authority, which Stage 3 is what makes safe. Proven end to end on a real run:
 builder -> tests pass -> real judge PASS, total cost including the judge (TASK-GATE).
 The block-then-rebuild cycle is proven deterministically by test; a real model kept
 writing correct code first try, so it was not watched live (same honesty as Stage
-2's revert guard). Still open, by design: Stage 3 is the eval dataset that measures
-whether the judge, now driving the builder, is actually right.
+2's revert guard).
+
+Layer 6 Stage 3 (the eval dataset, on the `layer6-evals` branch) is what measures
+the judge that Stage 2 put in charge. Eight labelled cases under `evals/cases/`,
+each a directory holding a real ticket (parsed by `Ticket.from_file`, no second
+parser), the code as it was (read through the real `Repo`), and labels saying which
+criteria that code actually meets. `evals.py` grades, `evalstore.py` records, and
+migration 004 adds `judge_evals` with `judge_accuracy` and `judge_stability`.
+
+The two failures it exists to see, neither of which anything caught before: **false
+pass** (labelled not_satisfied, judged satisfied: the gate waves wrong code
+through) and **false block** (labelled satisfied, judged not_satisfied: the gate
+burns a rebuild attempt on correct code). Before Stage 2 only the first mattered
+and it was advisory. After Stage 2 both cost money every run.
+
+Labels are two-state where the judge is three, on purpose: a labeller who is
+uncertain has not finished making the case. Each label carries its criterion's
+*text* as well as its index, and the loader refuses to run when they disagree,
+because reordering a ticket's bullets would otherwise silently repoint every label
+and produce a confident wrong number. Real and constructed cases are reported as
+separate cuts and never merged: harvesting only real runs is survivorship-biased in
+exactly the direction that matters, since the dangerous case is one nobody noticed.
+
+**The first real result, and how to read it.** `gpt-5.4-mini`, 8 cases, 16
+criteria, $0.005021: 16 of 16 agreed, zero false passes, zero false blocks, zero
+abstentions, 8 of 8 verdicts right for the right reason. At `--repeat 5`: 80 of 80,
+and `judge_stability` shows not one criterion where the judge gave two different
+answers.
+
+**That was not a win, and the plan said so before the run.** A perfect first result
+is evidence the constructed cases are too easy, not evidence the judge is good. Two
+cheap checks then confirmed it:
+
+- **External.** [JudgeBench](https://arxiv.org/pdf/2410.12784) (ICLR 2025) is the
+  standing benchmark for LLM judges and the best model on it scores **64%**.
+  Scoring 100%, far above the field's best, is a statement about the exam.
+- **Internal, for $0.001408.** Re-running with `gpt-5.4-nano` as judge also scored
+  **16 of 16**. A dataset that cannot separate a model from one 3.7x cheaper cannot
+  answer the routing question it was built for. The trap to avoid: "nano judges as
+  well as mini" is not a supported conclusion. The only supported conclusion is
+  that the dataset could not tell them apart.
+
+## The dataset was expanded to 14, and the judge failed
+
+Six new cases: three failure modes, each paired **buggy and fixed against one
+shared ticket**, so every pair is a controlled test of whether the judge can tell
+the two apart. The failure modes are documented outside this project rather than
+invented here (PEP 616 exists *because* programmers keep misusing `str.strip` as
+suffix removal; sort stability; binary floating point on money), and every claim in
+every label was verified by executing it. Two candidate claims were discarded at
+that step because running them showed they were false, which is the whole argument
+for verifying rather than recalling.
+
+**The finding is a false pass, the dangerous quadrant.** Given
+`sum(prices) == expected` and the criterion "amounts that are mathematically equal
+are reported as matching", `gpt-5.4-mini` answers **satisfied**, in **6 of 6
+samples** (`judge_stability`: `distinct_answers = 1`). Its reasons are five
+rewordings of one move:
+
+> "The function returns True when sum(prices) equals expected, covering
+> mathematically equal amounts."
+
+It restates the code and treats the restatement as proof. It never asks whether
+floating-point `==` means "mathematically equal", which it does not:
+`sum([0.1, 0.2]) == 0.3` is `False`. With `--gate` on, that patch reaches the
+working tree every time, and it is a money bug in a checkout reconciliation.
+`gpt-5.4-nano` shares the identical blind spot, which points at the prompt rather
+than the model.
+
+**And the dataset now discriminates.** On the six new cases mini disagrees on one
+criterion; nano disagrees on four (the same false pass, plus a false block on the
+*correct* stable sort, plus two abstentions). Verdict counts alone read 13 of 14
+for both and would call them equivalent. **Right-verdict-for-the-right-reason
+separates them, 13 to 11.** That is that metric earning its place: the judge's
+named criteria become the builder's instructions, so a right answer reached by
+wrong reasoning sends the builder to fix the wrong thing.
+
+Report and view print counts, never rates: at fourteen cases one flipped verdict
+still moves a percentage by several points and reads as a measurement. Nothing here
+is a pass mark, no threshold was introduced, and the gate's fail-open behaviour is
+unchanged. This stage measures; it does not tune.
 
 Layer 4 (event-sourced replay) and Layer 7 (Temporal) are the industrial layers:
 worth it at volume or for the learning, not before. `checks.py` already seeded the
@@ -203,6 +292,230 @@ and the span hardcodes `gen_ai.system = "openai"`, which would be a lie.
 ## Known gaps
 
 Both of the Layer 0 gaps recorded in PLAN.md are now closed.
+
+**The ratio metric hides the cost of a whole-file rewrite, and on real files the
+bill is dominated by output. (Open. Arithmetic, not yet observed.)**
+
+`pack.RULES` asks the model for "the complete new contents of each file you
+change". So output tokens scale with **file size, not change size**, and output is
+priced roughly 6x input. Measured against a real repository (`boltons`, 112 files,
+cloned to a scratch dir; `estimate_tokens`, so a rule of thumb rather than a
+tokeniser), a **one line** fix to `boltons/urlutils.py`:
+
+```
+input   14,541 tokens   $0.0113
+output  14,382 tokens   $0.0647     5.7x the input cost
+```
+
+Now put that beside the number this project was founded on:
+
+| | ratio | cost |
+|---|---|---|
+| Andrew's 70,000 in / 100 out | 700, reads as terrible | ~$0.053 |
+| the one-line urlutils fix | 1.0, reads as ideal | **$0.078** |
+
+**The healthy-looking ratio costs more.** `ratio` measures shape, not money. A low
+ratio can mean "a small focused change" or "the model regurgitated a 1,600 line
+file", and nothing in `ratio_by_role` distinguishes them. Every number in the
+baseline above was taken on files small enough that the two never diverged, so the
+metric has never yet been in a position to mislead. On real code it is.
+
+Consequences worth stating:
+- `avg_output` and `ratio` in `ratio_by_role` should be read next to file size, not
+  on their own. A rate column would make this worse, not better.
+- The single biggest cost lever on a real repo is probably not context trimming at
+  all, it is a patch format whose output scales with the change. A diff or
+  search/replace format is the fix, and it is a real architectural change with its
+  own parser and its own failure modes, not a tweak.
+- Truncation becomes a live risk, not a theoretical one: a 14,382 token reply must
+  be emitted perfectly, and `finish_reason='length'` is already a documented
+  failure mode here.
+
+Found by arithmetic before any spend, which is the cheapest kind of finding.
+
+**Then it was run for real, and the whole-file rule turned out to be worse than
+expensive. It is unsafe.**
+
+The first time agentpipe has ever been pointed at a real third-party codebase:
+`mahmoud/boltons` (112 files, 445 tests in 8.5s, no dependencies, BSD), on its
+real open issue #301, whose bug was verified to still reproduce before the ticket
+was written. One attempt, `gpt-5.4-mini`, `--apply`.
+
+```
+input 9,677   output 8,820   thinking 0   finish_reason stop   $0.046948
+reply 39,267 chars      agentpipe verdict: REFUSED (no --- end terminator)
+```
+
+Four findings, in ascending order of importance.
+
+**1. Not truncation.** The prediction above was that a large file would be cut off
+mid-reply. Wrong: `finish_reason='stop'`. The model finished, and simply never
+wrote the seven-character `--- end`. boltons files end with their own
+`# end funcutils.py` comment, and after 39,000 characters that appears to have
+satisfied the model's sense of an ending. Across all 118 calls this project has
+ever made, **not one has ever truncated**. The output budget in `builder.py`
+continues to solve a problem that has never occurred.
+
+**2. Tests are not evidence, demonstrated on somebody else's code.** Applying the
+rejected reply by hand: **445 of 445 boltons tests passed**. And the ticket's own
+acceptance check still failed. The patch did not fix the bug. This is the founding
+thesis of the project reproduced on a real repository: green tests over work that
+was not done.
+
+**3. It silently altered the BSD licence.** Asked to retype a 38,692 character
+file to change a few lines, it rewrote the copyright header. From the diff:
+
+```
+-# LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+-# A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
++# LIMITED TO THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
++# A PARTICULAR PURPOSE. IN NO EVENT SHALL THE COPYRIGHT
+
+-# LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+-# DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++# LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; OR BUSINESS ...
+```
+
+`ARE DISCLAIMED` deleted from the warranty disclaimer. `LOSS OF USE, DATA, OR
+PROFITS;` deleted from the damages clause. No test covers a licence header, so
+nothing anywhere would have caught it. **The whole-file rule does not just cost
+more, it gives the model licence to change anything in the file while it is
+retyping.** A diff or search/replace format makes that structurally impossible,
+which upgrades it from a cost optimisation to a safety fix.
+
+**4. The loop would have called this a PASS.** Validation (`pytest -q
+tests/test_funcutils.py`) passes on this patch. `loop.py` returns `verdict="pass"`
+when validation passes, and `_acceptance_disagreement` attaches the failing
+acceptance check as a *warning*, not a gate. So with `--max-attempts 3` this run
+reports PASSED, with a note, on a patch that does not fix the reported bug and
+quietly edits a licence. That gap is documented in `loop.py`'s own docstring
+("A warning, not a gate... Layer 6's judge is what actually closes it") and has
+now been seen live.
+
+What saved the working tree was `parse_edits` refusing a reply with no terminator,
+which is the right outcome reached for an unrelated reason. Strictness paid off
+by luck.
+
+**The test suite used to leave background git daemons behind. (Closed, and it
+took a machine down first.)**
+
+Most fixtures build a real git repository in a temp directory, because this
+project refuses doubles that can drift from the real thing. That decision is
+right and stays. What went unnoticed is its cost on Windows: `git add` spawns
+`git fsmonitor--daemon run --detach --ipc-threads=8`, which is detached,
+long-lived by design, and carries on watching a directory pytest then deletes.
+With 18 git call sites across 8 test files, plus `evals.materialise` doing an
+init and an add per case (40 subprocesses for a twenty-case `--dry-run`), a
+session leaves a crowd of them behind. Cyril's machine crashed during one.
+
+Closed in two places, both measured rather than assumed:
+
+- `tests/conftest.py` sets `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` /
+  `GIT_CONFIG_VALUE_n` in the environment, which git applies to every invocation
+  and subprocesses inherit. One file covers all 18 call sites and any added later.
+- `evals.materialise` passes the same flags to both its git calls.
+
+The first attempt hardened `git init` only and did nothing, which the measurement
+caught:
+
+```
+plain init + plain add          +1 daemon
+hardened init + PLAIN add       +1 daemon      <- the fix that did not fix
+hardened init + hardened add    +0 daemons
+```
+
+Verified after: 58 tests across the git-heaviest files, daemon count 2 before and
+2 after.
+
+Two lessons worth keeping. First, `--dry-run` was materialising every case purely
+to estimate tokens, so a command people run constantly and expect to be free was
+spawning 40 subprocesses; token estimation is now behind `--tokens`. An optional
+extra welded onto the cheap path gets paid for by everyone. Second, this is the
+same root as the test that grew slower with every case added: one decision
+(materialise per case) with two symptoms, and the first symptom was patched
+without asking what caused it.
+
+**Cacheable prefix depends on path lengths, which nobody would predict.**
+`RULES` + the file tree is the only guaranteed-stable prefix across retries.
+On agentpipe that is 159 + 982 = 1,141 tokens, above the ~1,024 threshold. On
+boltons it is 159 + 587 = 746, **below** it, because boltons uses short paths
+(`boltons/urlutils.py`) where agentpipe uses long ones (`src/agentpipe/...`). Same
+design, same file count, opposite caching behaviour. Beyond the tree, the cache
+also covers any selected file that precedes the first one the model edits, so the
+order of a ticket's `Files:` section decides how much stays cached. Untested.
+
+**The judge has a known, stable blind spot. The obvious fix was tried and did not
+work. (Open.)** It reads an equality check and concludes the criterion about
+equality is met, without asking whether that check is correct. 6 of 6 samples on
+`gpt-5.4-mini`, and `gpt-5.4-nano` does the same.
+
+A general prompt instruction was added telling the judge to trace a concrete input
+rather than reason from the shape of the code, and to give a reason naming that
+input. Measured, then reverted. `rules_hash` moved `32fd7082` -> `5d671398`, so both
+attempts sit in `judge_evals` separately rather than averaged:
+
+- **No accuracy change.** Still 1 false pass, still 0 false blocks, still 13/14 on
+  both verdict metrics.
+- **About 34% more expensive** on the same fourteen cases ($0.008853 -> $0.011866
+  at full price), for every gated run, forever.
+- **The failure moved, which is the actual finding.** The reason changed from
+  restating the code to `"For prices=[1, 2] and expected=3, sum(prices) is 3 so the
+  function returns True."` The judge obeyed the instruction, traced a concrete
+  input, and picked integers, which have no floating point problem. The blind spot
+  is not "does not check", it is "chooses a friendly input". Different bug, sharper
+  diagnosis, and the next attempt has to constrain *which* input.
+- Reading the score alone would have said "no change, try again". Reading the
+  reason said the failure had moved. A verdict-only eval would have discarded the
+  most useful output of the experiment.
+
+Reverted rather than iterated on purpose: steering attempt two with the answer in
+hand is how a prompt ends up tuned to fourteen cases with no record of the cost.
+Reverting was free, since every answer under the old hash is cached; re-running
+reproduced the baseline exactly at $0 billed.
+
+**The blind spot is narrower than it first looked, and the shape of it matters.**
+The dataset was pushed to 20 cases to test whether the float failure was one member
+of a family ("the judge accepts a nearly-right operation"). Three siblings, each a
+matched buggy/fixed pair: floor division losing a penny, `==` on email missing
+capitalisation, `sorted()` ordering by character code. **The judge got all six
+right, stably. The hypothesis is disconfirmed, for $0.0086.**
+
+The real pattern is not the kind of operation, it is whether the defect exists in
+the text. `[total // people] * people` visibly discards a remainder; `a == b`
+visibly lacks normalisation; `sorted(names)` visibly lacks a key. But
+`sum(prices) == expected` **is correct code** for integers, `Decimal` and
+`Fraction`. It is wrong only because of how binary floating point stores decimals,
+and that fact is nowhere in the source. **The judge fails when catching the defect
+requires knowing runtime behaviour rather than reading the code.**
+
+That also explains the failed prompt fix: told to trace a concrete input it chose
+`1, 2, 3`, which read as laziness but was not. For those values the code genuinely
+is correct. It answered the only question reading can ask. Further prompt attempts
+should therefore be expected to fail for a principled reason, which is worth
+knowing before paying for attempts two through four, and it is the argument for
+letting the judge *run* code rather than reason about it.
+
+**Both cheap screening methods were measured, and both have the same limit.**
+Cheap-model disagreement flagged four cases; in all four mini was right and nano
+wrong, so it is a model-selection signal, and it missed the one case mini fails
+because both models agree there. Stability found nothing unstable, yet
+`float-money-buggy` is perfectly stable and wrong (6 of 6) while the new cases are
+perfectly stable and right (3 of 3). **Both measure confidence, neither measures
+correctness**, and a confidently wrong judge is the dangerous case. Useful for
+comparing models; useless for finding blind spots.
+
+**The eval dataset has no harvest path. (Open, and it is the one that matters.)**
+Cases are built by hand. `TASK-GATE` could not become a case at all because the
+run's files were never captured, so a real judge verdict from a real run is already
+unrecoverable. Eleven of fourteen cases are `constructed`, and the provenance field
+has only two values, so a case whose failure mode is documented in the wild (PEP
+616, sort stability, float money) is recorded the same as one invented here. That
+understates the newer cases rather than overstating them, which is the safe
+direction, but the distinction is real and the field cannot express it. Until a
+real disagreement can be turned into a case cheaply, the dataset grows in the
+direction of what we imagine rather than what happens. What would fix it: capture
+the judged files alongside the verdict, so `--gate` on a real ticket leaves behind
+everything a case needs.
 
 **Spans go nowhere. (Closed.)** `trace_id` and `span_id` used to write as all
 zeros, because no tracer was configured and OTel's no-op default discarded every
@@ -276,3 +589,14 @@ None errored. All lied. This is why the meter exists, and it is why Andrew's
 70,000 sat there unnoticed: nothing was broken, it just cost money.
 
 When something looks fine, that is not evidence. Check the table.
+
+**A sixth, running the other way (23 July 2026).** The eval harness's first
+`--repeat 5` reported $0.024944 spent. Only $0.019923 was billed: sample 0 of every
+case replayed from the run before it, and `cost_usd` on a replayed record carries
+the original price. This one *over*stated rather than hid, which makes it the
+friendlier direction, but it is the same family: a number that looked right,
+computed correctly, and answered a different question than the one being asked.
+The money was the small half. The real half is that a replayed sample is not an
+independent draw, so counting replays toward stability would have reported perfect
+consistency for a judge that was asked once. Fixed by separating billed from full
+price; pinned by `test_a_replayed_sample_is_not_counted_as_spend`.

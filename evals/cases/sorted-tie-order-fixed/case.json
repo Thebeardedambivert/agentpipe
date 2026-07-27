@@ -1,0 +1,19 @@
+{
+  "provenance": "constructed",
+  "note": "The correct half of the tie-order pair. reverse=True sorts descending while leaving tied runs in their original order, which is exactly why it exists instead of reversing afterwards. The two versions differ by a handful of characters and behave differently only on ties, so this pair is the sharpest discrimination test in the set. Every claim below was verified by running it.",
+  "files": ["leaderboard.py"],
+  "labels": [
+    {
+      "criterion": 0,
+      "text": "players are ordered from the highest score to the lowest",
+      "expect": "satisfied",
+      "why": "verified: scores come back [3, 3, 1]."
+    },
+    {
+      "criterion": 1,
+      "text": "players with equal scores keep the order they were given in",
+      "expect": "satisfied",
+      "why": "reverse=True inverts the comparison rather than the finished list, so stability is preserved. Verified: alice and bob, both on 3 and given in that order, come back as ['alice', 'bob', 'carol']."
+    }
+  ]
+}

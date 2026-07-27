@@ -1,0 +1,19 @@
+{
+  "provenance": "constructed",
+  "note": "The correct half of the bill-splitting pair. divmod keeps the remainder and hands one extra penny to as many payers as needed, so nothing is lost and nobody pays more than a penny over. Every claim below was verified by running it.",
+  "files": ["split.py"],
+  "labels": [
+    {
+      "criterion": 0,
+      "text": "the amounts always add up to exactly the total",
+      "expect": "satisfied",
+      "why": "verified: split_bill(100, 3) returns [34, 33, 33], which sums to exactly 100. The remainder is distributed rather than discarded."
+    },
+    {
+      "criterion": 1,
+      "text": "no two people are asked for amounts differing by more than one penny",
+      "expect": "satisfied",
+      "why": "verified: the spread between the largest and smallest amount is 1. Only the first `extra` payers pay a single penny more."
+    }
+  ]
+}

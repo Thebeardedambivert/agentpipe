@@ -1,0 +1,19 @@
+{
+  "provenance": "constructed",
+  "note": "The unambiguous control. One criterion plainly met, one plainly not, in three lines with nowhere to hide. If the judge cannot separate these two, no result from the subtle cases means anything, because the failure is not subtlety. It is also the case that catches a scorer bug: the counts must land in two different cells.",
+  "files": ["slugify.py"],
+  "labels": [
+    {
+      "criterion": 0,
+      "text": "the slug is lowercase with spaces replaced by hyphens",
+      "expect": "satisfied",
+      "why": "lower() and replace(' ', '-') do exactly this, and strip() removes the edge whitespace that would otherwise become leading hyphens."
+    },
+    {
+      "criterion": 1,
+      "text": "punctuation is removed, so the slug needs no URL escaping",
+      "expect": "not_satisfied",
+      "why": "nothing touches punctuation. slugify('Hello, World!') returns 'hello,-world!', and both the comma and the exclamation mark survive into the URL."
+    }
+  ]
+}

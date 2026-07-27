@@ -1,0 +1,19 @@
+{
+  "provenance": "constructed",
+  "note": "The correct half of the strip-suffix pair, same ticket, using the stdlib method PEP 616 added for exactly this problem. Its job is to catch a judge that blocks everything: a sensor that says not_satisfied to both halves of a pair has not read either. Every claim below was verified by running it.",
+  "files": ["hosts.py"],
+  "labels": [
+    {
+      "criterion": 0,
+      "text": "only a trailing \".com\" is removed; characters elsewhere in the hostname are left alone",
+      "expect": "satisfied",
+      "why": "removesuffix matches the whole substring at the end and removes it only there. Verified: 'microsoft.com' -> 'microsoft', 'comcast.com' -> 'comcast', 'mom.com' -> 'mom'."
+    },
+    {
+      "criterion": 1,
+      "text": "a hostname that does not end in \".com\" is returned unchanged",
+      "expect": "satisfied",
+      "why": "removesuffix returns the string untouched when the suffix is absent. Verified: 'example.org' -> 'example.org'."
+    }
+  ]
+}

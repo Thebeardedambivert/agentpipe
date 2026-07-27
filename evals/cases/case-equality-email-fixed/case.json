@@ -1,0 +1,19 @@
+{
+  "provenance": "constructed",
+  "note": "The correct half of the email pair. casefold is the aggressive form of lower() intended for exactly this comparison, and strip removes the whitespace a user pastes in by accident. Every claim below was verified by running it.",
+  "files": ["accounts.py"],
+  "labels": [
+    {
+      "criterion": 0,
+      "text": "addresses differing only in capitalisation are treated as the same account",
+      "expect": "satisfied",
+      "why": "verified: same_account('Bob@Example.com', 'bob@example.com') returns True. Both sides are folded to one form before comparing."
+    },
+    {
+      "criterion": 1,
+      "text": "genuinely different addresses are treated as different accounts",
+      "expect": "satisfied",
+      "why": "verified: same_account('bob@example.com', 'alice@example.com') returns False. Folding the case does not make different names equal."
+    }
+  ]
+}

@@ -270,10 +270,10 @@ routing, cost and latency).
 **Goal:** stop bad work before it reaches the expensive part.
 
 **Tasks**
-- [ ] Small eval dataset from real tickets
-- [ ] Judge scores the patch before review
-- [ ] Below threshold: back to the builder, do not open a PR
-- [ ] Track judge cost separately, it must earn its place
+- [x] Small eval dataset from real tickets
+- [x] Judge scores the patch before review
+- [x] Below threshold: back to the builder, do not open a PR
+- [x] Track judge cost separately, it must earn its place
 
 **Decisions and why**
 
@@ -293,6 +293,15 @@ check-less acceptance criteria one by one, three-state (satisfied / not_satisfie
 uncertain), and passes only if all are satisfied. It honors the intent here (stop
 bad work before the expensive stretch) without inventing a cutoff, and it says
 which criterion failed and why, which a single score hides. See plans/layer6.md.
+
+*The eval dataset judges the judge, and reports counts rather than a rate.* The
+first task above is done last, deliberately, and that inversion is worth naming:
+Stage 2 handed an unmeasured sensor authority over the builder, and Stage 3 is what
+makes that defensible rather than lucky. The dataset is small (eight cases, five
+constructed) and says so; a rate computed over it would look like a measurement and
+be a story. What it buys is the two failures nothing else in the pipeline can see:
+a judge that passes wrong code, and a judge that blocks right code, the second of
+which only started costing money once Stage 2 let a block trigger a rebuild.
 
 **Path:** P2 (evals as CI/CD gates, LLM-as-a-judge, harness sensors). The path
 frames evals as quality. Here they are also the cheapest cost control you have.

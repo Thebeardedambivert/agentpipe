@@ -1,0 +1,20 @@
+{
+  "provenance": "real",
+  "source": "TASK-JUDGE-ROBUST",
+  "note": "The Stage 1 proving run, 18 Jul 2026, $0.000573. The judge returned PASS and cited the raise. The all-satisfied control: a dataset made only of broken code rewards a judge that blocks everything, and this is one of the three cases that stops it.",
+  "files": ["truncate.py"],
+  "labels": [
+    {
+      "criterion": 0,
+      "text": "truncate rejects a negative length with a clear error",
+      "expect": "satisfied",
+      "why": "an explicit guard raises ValueError before slicing, and the message names the offending value."
+    },
+    {
+      "criterion": 1,
+      "text": "the result never exceeds length characters",
+      "expect": "satisfied",
+      "why": "text[:length] is bounded by length, and the negative case is already refused above."
+    }
+  ]
+}

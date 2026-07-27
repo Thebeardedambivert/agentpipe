@@ -1,0 +1,20 @@
+{
+  "provenance": "real",
+  "source": "TASK-JUDGE-THIN",
+  "note": "The Stage 1 proving run, 18 Jul 2026, $0.000591. Thin truncate: passes its test, does not reject a negative length. The judge returned BLOCK and named the right criterion. Kept because a case the judge got right is the baseline that tells you when it stops getting it right.",
+  "files": ["truncate.py"],
+  "labels": [
+    {
+      "criterion": 0,
+      "text": "truncate rejects a negative length with a clear error",
+      "expect": "not_satisfied",
+      "why": "there is no guard at all. A negative length slices from the end, so truncate('hello', -2) returns 'hel' silently instead of raising."
+    },
+    {
+      "criterion": 1,
+      "text": "the result never exceeds length characters",
+      "expect": "satisfied",
+      "why": "text[:length] is bounded by length for any non-negative length; nothing is appended after the slice."
+    }
+  ]
+}
