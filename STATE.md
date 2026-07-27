@@ -76,10 +76,11 @@ one attempt on `gpt-5.4-mini`. The first run refused the patch; applying it by
 hand showed 445/445 tests green, the bug still unfixed, and the BSD licence
 silently edited. The patch format was rebuilt around search/replace and the
 second run cost 5.8x less, left the licence structurally untouchable, and was
-refused again for the same missing `--- end` terminator. See "the whole-file
-rule" and the run after it under Known gaps. The pipeline still has not completed
-a run against code it did not grow up with, and the remaining blocker is one
-seven-character sentinel, not the context builder.
+refused again for the same missing `--- end` terminator, which has since been
+removed for edit blocks. See "the whole-file rule" and the run after it under
+Known gaps. The pipeline still has not *completed* a run against code it did not
+grow up with: the format now accepts what the model sends, but the one patch it
+has produced there passed the tests without fixing the bug.
 
 **1. Proven end-to-end on real work. (Done, 18 July 2026.)**
 The pipeline ran a real ticket start to finish on `gpt-5.4-mini`: TASK-TRUNCATE,
@@ -444,10 +445,64 @@ the first try, in a 1,062 line third-party file. One observation, not a rate.
 luck.** `finish_reason='stop'`, one well-formed SEARCH/REPLACE pair, and no
 `--- end`. Two runs against a real repository, two omissions of the same
 seven-character sentinel. The 39,000-character explanation ("after that much text
-the model forgot") is dead: this reply was 572 characters. `--- end` is redundant
-information in a format that already has `>>>>>>> REPLACE` as an unambiguous
-terminator, and models drop redundant sentinels. Open, and it is now the single
-thing standing between this pipeline and a working run on real code.
+the model forgot") is dead: this reply was 572 characters.
+
+The first draft of this paragraph said models drop redundant sentinels. **The
+table was then asked, and it says otherwise.** Across all 118 recorded replies,
+`--- end` is the same terminator the judge and reviewer use, and it is missing
+from exactly five:
+
+```
+content in the block   replies   missing '--- end'
+JSON  (judge/reviewer)     108          0
+code  (builder/fixer)       10          5
+```
+
+Same sentinel, same models: `gpt-5.4-nano` missed it 3 of 3 times as a fixer and
+wrote it correctly 20 of 20 times as a judge. So it is not model capability, and
+it is not reply length either (the five misses run from 116 to 39,267 characters).
+What the failures share is that **the block carries code**. JSON ends with a
+bracket the model has to close anyway; code just stops, and boltons files even end
+with their own `# end funcutils.py`. The honest claim is therefore narrow: a
+terminator after a block of code is unreliable, at 5 of 10, while the identical
+terminator after a block of JSON has never once been missed.
+
+The census also says the fixer has been quietly losing nano's work to this the
+whole time: TASK-FIX-DEMO, TASK-FIX-MINI and TASK-S3-NANO were all recorded as
+`unfixable` with correct code in the reply. That was written up as nano being bad
+at formats, and it fed the Stage 3 conclusion that routing trades cost against
+format reliability. It was this. The `fixer_reliability` view's nano 0% fix rate
+is measuring the terminator, not the model, and any routing decision taken from
+that row needs re-reading.
+
+**Closed the same day, by deleting the requirement rather than tuning it.** An
+edit block now ends at the next `--- path` header or at the end of the reply.
+`--- end` is still required for a NEW block, where content is arbitrary and
+nothing else could mark the end, and unchanged for the judge and reviewer, where
+it has never once failed. Both shapes parse, so nothing recorded is invalidated.
+
+Three things about the shape of the fix, since it is the parser that guards the
+working tree:
+
+- **Parser only. `pack.RULES` still asks for `--- end`.** The prompt is the front
+  of every pack, so editing it moves the cacheable prefix and makes every recorded
+  reply unreplayable. The mismatch costs a handful of tokens per call. What would
+  settle removing it: a measured cache saving big enough to justify reprinting the
+  prefix once.
+- **Scanning is line-oriented and pair-aware, not a regex.** Once a block can end
+  at the next header, the parser has to decide whether `--- something.py` inside a
+  REPLACE body is structure or code being inserted. A regex cannot know; the
+  scanner tracks whether it is inside a pair and treats everything there as
+  content. `test_a_header_line_inside_replacement_code_is_content_not_structure`
+  closes that hole before it could bite, since it was created by this change.
+- **Nothing else got friendlier.** Text between pairs, or after the last REPLACE,
+  is now refused with its own message. The terminator went because it was
+  redundant, not because refusing was wrong: a reply that half-followed the format
+  must never be applied as though it fully did.
+
+Verified on the thing itself rather than on a test double: the real 572 character
+reply, read back out of `model_calls` with nothing added, now parses, resolves and
+applies, and the licence diff is still one hunk with zero header lines touched.
 
 The error message is also wrong in a way worth fixing: a reply with correct
 markers and no terminator is reported as "the model replied with prose instead of

@@ -124,10 +124,18 @@ def test_same_file_twice_is_refused():
         parse_blocks(reply)
 
 
-def test_unterminated_block_is_refused():
-    """Exactly what boltons #301 did: the whole reply, no terminator."""
-    with pytest.raises(PatchError, match="no file blocks"):
-        parse_blocks("--- a.py\nsome content that never ends")
+def test_a_body_with_no_pairs_is_refused_whether_or_not_it_is_terminated():
+    """An unterminated block is no longer the failure. An unusable body still is.
+
+    This used to assert that a missing '--- end' was refused. That requirement was
+    removed for edit blocks on 27 July 2026 (see patch.py), so what is left to
+    check is the thing that actually matters: a body carrying no SEARCH/REPLACE
+    pairs is refused, and the message says why, terminator or not.
+    """
+    for reply in ("--- a.py\nsome content that never ends",
+                  "--- a.py\nsome content that never ends\n--- end"):
+        with pytest.raises(PatchError, match="Whole-file rewrites are not accepted"):
+            parse_blocks(reply)
 
 
 def test_end_marker_inside_content_does_not_terminate_early():
@@ -235,6 +243,127 @@ def test_new_on_an_existing_file_is_refused(repo):
     reply = "--- src/thing.py NEW\nwiped\n--- end"
     with pytest.raises(PatchError, match="marked NEW but the file already exists"):
         parse_edits(reply, repo)
+
+
+# --- the regression tests for the second boltons run ------------------------
+
+# The reply gpt-5.4-mini actually sent on 27 July 2026, trimmed to the shape that
+# matters. It is well-formed in every respect except the terminator it omitted.
+BOLTONS_REPLY_27_JULY = (
+    "--- boltons/funcutils.py\n"
+    "<<<<<<< SEARCH\n"
+    "    def _argspec_to_dict(cls, f):\n"
+    "=======\n"
+    "    def _argspec_to_dict(cls, f):  # patched\n"
+    ">>>>>>> REPLACE\n"
+)
+
+
+def test_a_reply_without_a_terminator_is_no_longer_thrown_away():
+    """Named for the run that paid for this change.
+
+    boltons #301, 27 July 2026, gpt-5.4-mini, $0.008044. The reply was 572
+    characters: one file header, one well-formed SEARCH/REPLACE pair, quoting the
+    real file character for character, and no '--- end'. finish_reason was 'stop',
+    so nothing was cut off. The parser refused all of it, and reported the refusal
+    as "the model replied with prose instead of following the format".
+
+    The census that followed is why the fix is shaped this way rather than tuned:
+    of 118 recorded replies, '--- end' was missing from 5, all 5 carried code, and
+    the 108 carrying JSON never missed it once. So the terminator is not required
+    where '>>>>>>> REPLACE' already ends the block.
+    """
+    blocks = parse_blocks(BOLTONS_REPLY_27_JULY)
+    assert len(blocks) == 1
+    assert blocks[0].path == "boltons/funcutils.py"
+    assert blocks[0].pairs[0].search == "    def _argspec_to_dict(cls, f):\n"
+
+
+def test_the_same_reply_with_a_terminator_still_parses_identically():
+    """Both shapes are accepted, because pack.RULES still asks for the marker.
+
+    A parser that only understood the new shape would refuse every reply the
+    prompt asks for, which is the reverse of this bug and just as expensive.
+    """
+    with_end = parse_blocks(BOLTONS_REPLY_27_JULY + "--- end\n")
+    without = parse_blocks(BOLTONS_REPLY_27_JULY)
+    assert with_end[0].pairs == without[0].pairs
+
+
+def test_several_files_none_terminated():
+    """The case option 2 would have left broken, and nobody has seen live yet."""
+    reply = (
+        "--- a.py\n"
+        "<<<<<<< SEARCH\nold one\n=======\nnew one\n>>>>>>> REPLACE\n"
+        "--- b.py\n"
+        "<<<<<<< SEARCH\nx\n=======\ny\n>>>>>>> REPLACE\n"
+    )
+    blocks = parse_blocks(reply)
+    assert [b.path for b in blocks] == ["a.py", "b.py"]
+    assert blocks[0].pairs[0].search == "old one\n"
+    assert blocks[1].pairs[0].replace == "y\n"
+
+
+def test_a_header_line_inside_replacement_code_is_content_not_structure():
+    """The known unknown this change created, closed before it could bite.
+
+    Dropping the terminator means a block ends at the next '--- path' header, so
+    the parser has to know that such a line inside a REPLACE body is code being
+    inserted, not a new block. This is why scanning is pair-aware rather than a
+    regex.
+    """
+    reply = (
+        "--- doc.py\n"
+        "<<<<<<< SEARCH\nHEADER = ''\n=======\n"
+        "HEADER = '''\n"
+        "--- not/a/file.py\n"
+        "--- end\n"
+        "'''\n"
+        ">>>>>>> REPLACE\n"
+    )
+    blocks = parse_blocks(reply)
+    assert len(blocks) == 1, "a header inside a body started a phantom block"
+    assert "--- not/a/file.py\n--- end\n" in blocks[0].pairs[0].replace
+
+
+def test_commentary_around_the_pairs_is_refused():
+    """Strictness is unchanged where it was doing real work.
+
+    The terminator went because it was redundant, not because the parser got
+    friendlier. Text outside a pair is still a refusal, because a reply that
+    half-followed the format must not be applied as though it fully did.
+    """
+    with pytest.raises(PatchError, match="unexpected text after the last REPLACE"):
+        parse_blocks(BOLTONS_REPLY_27_JULY + "\nHope that helps!\n")
+
+    between = (
+        "--- a.py\n"
+        "<<<<<<< SEARCH\nx\n=======\ny\n>>>>>>> REPLACE\n"
+        "and now the second change:\n"
+        "<<<<<<< SEARCH\np\n=======\nq\n>>>>>>> REPLACE\n"
+    )
+    with pytest.raises(PatchError, match="unexpected text between"):
+        parse_blocks(between)
+
+
+def test_a_new_block_still_needs_its_terminator():
+    """The one place the marker does real work, so it stays required.
+
+    A NEW block carries a whole file. Its content is arbitrary text with no
+    internal markers, so nothing except '--- end' can say where it stops.
+    """
+    with pytest.raises(PatchError, match="NEW block must end with"):
+        parse_blocks("--- fresh.py NEW\nhello = 1\n")
+
+
+def test_pairs_with_a_header_looking_line_are_reported_without_a_header():
+    """The message that misdiagnosed the real run, fixed.
+
+    Pairs with no '--- path' header used to be reported as prose. It is not
+    prose, and saying so sends the reader to the wrong place.
+    """
+    with pytest.raises(PatchError, match="no '--- path' header line"):
+        parse_blocks("<<<<<<< SEARCH\nx\n=======\ny\n>>>>>>> REPLACE\n")
 
 
 # --- the regression test for the run that caused all of this ----------------

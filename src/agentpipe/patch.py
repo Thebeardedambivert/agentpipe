@@ -46,7 +46,6 @@ Editing a file that exists:
     =======
     what to put there instead
     >>>>>>> REPLACE
-    --- end
 
 Creating a file that does not exist, the only case where full content is legal
 because there is nothing there to corrupt:
@@ -61,6 +60,45 @@ the result of the last.
 Exact matching earns something the old format could never offer: the edit is
 *checkable*. A SEARCH that matches nothing, or matches twice, is refused rather
 than guessed at. A whole-file rewrite could not be checked against anything.
+
+Why an edit block needs no terminator and a NEW block does
+----------------------------------------------------------
+
+An edit block used to require a closing `--- end` too. It was removed on 27 July
+2026 after the second boltons run, and the reason is a measurement rather than a
+preference.
+
+`--- end` is the same sentinel the judge and the reviewer use. Across the 118
+replies recorded at that point it was missing from exactly five, and the split is
+not subtle:
+
+    content in the block   replies   missing '--- end'
+    JSON  (judge/reviewer)     108          0
+    code  (builder/fixer)       10          5
+
+Not model capability: `gpt-5.4-nano` missed it 3 of 3 times as a fixer and wrote
+it 20 of 20 times as a judge. Not reply length: the misses run from 116 to 39,267
+characters. What the failures share is that the block carries **code**. JSON ends
+with a bracket the model must close anyway, so it is already closing things off.
+Code just stops, and boltons files even end with `# end funcutils.py`, which
+already reads as an ending.
+
+So the terminator is asked to do a job it cannot reliably do, in the one place it
+was never needed: `>>>>>>> REPLACE` already ends the last pair unambiguously. An
+edit block now ends at the next `--- path` header or at the end of the reply. A
+NEW block keeps the terminator because its content is arbitrary text with no
+internal markers, so nothing else could possibly say where it stops.
+
+This is a parser change only. `pack.RULES` still shows `--- end`, deliberately:
+the prompt is the front of every pack, so editing it moves the cacheable prefix
+and invalidates every recorded reply for replay. Both shapes are accepted, the
+cost of the mismatch is a handful of tokens per call, and what would settle
+removing it from RULES is a measured cache saving large enough to justify
+reprinting the prefix once.
+
+Scanning is line-oriented and pair-aware for exactly one reason: while inside a
+SEARCH or REPLACE body, a line that looks like a header or a terminator is
+content, not structure. Real code contains such lines.
 """
 
 from __future__ import annotations
@@ -72,15 +110,22 @@ from typing import Optional
 
 from agentpipe.repo import Repo, RepoError
 
-# One file's block. The optional NEW marker is the only way to send whole
-# content, and check_new refuses it when the path already exists.
+# One file's block opens here. The optional NEW marker is the only way to send
+# whole content, and resolve_edits refuses it when the path already exists.
 #
-# Non-greedy body, anchored to line starts, so a file containing the literal
-# text "--- end" mid-line cannot terminate its own block early.
-_BLOCK = re.compile(
-    r"^--- (?P<path>\S+)(?P<new>[ \t]+NEW)?[ \t]*\n(?P<body>.*?)^--- end\s*$",
-    re.MULTILINE | re.DOTALL,
-)
+# Matched against a single line rather than the whole reply, because where a
+# block *ends* is now decided by the scanner (see _split_blocks) and not by a
+# regex reaching forward through text it cannot interpret.
+_HEADER = re.compile(r"^--- (?P<path>\S+)(?P<new>[ \t]+NEW)?[ \t]*$")
+
+# Still accepted everywhere, still required to close a NEW block. Compared
+# against the stripped line, so "--- end of report" inside a body is content.
+_TERMINATOR = "--- end"
+
+# The two lines that open and close a pair. Used by the scanner to know when it
+# is inside a body, where structure-looking lines are just text.
+_PAIR_OPEN = "<<<<<<< SEARCH"
+_PAIR_CLOSE = ">>>>>>> REPLACE"
 
 # One search/replace pair inside a block. The markers are the conventional ones,
 # so a model that has seen this format anywhere has seen these exact characters.
@@ -162,6 +207,126 @@ class FileEdit:
     content: str
 
 
+@dataclass(frozen=True)
+class _RawBlock:
+    """One block as the scanner found it, before its body is interpreted."""
+
+    path: str
+    is_new: bool
+    body: str
+
+
+def _split_blocks(reply: str) -> tuple[_RawBlock, ...]:
+    """Find each file's block and where it ends. Line-oriented and pair-aware.
+
+    A regex cannot do this correctly. It would have to decide whether a line
+    reading `--- something.py` is a header or a line of the code being inserted,
+    and that depends on whether the scan is currently inside a SEARCH or REPLACE
+    body. So the scan tracks that explicitly: inside a pair every line is
+    content, and only outside one can a line be structure.
+
+    An edit block ends at the next header, at an optional `--- end`, or at the end
+    of the reply. A NEW block ends only at `--- end`, because arbitrary file
+    content offers nothing else to stop at.
+    """
+    lines = reply.splitlines(keepends=True)
+    blocks: list[_RawBlock] = []
+    i, n = 0, len(lines)
+
+    while i < n:
+        header = _HEADER.match(lines[i].rstrip("\r\n"))
+        # Checked in this order because "--- end" also matches _HEADER, with a
+        # path of "end". A terminator is never the start of a block.
+        if lines[i].strip() == _TERMINATOR or not header:
+            i += 1
+            continue
+
+        path, is_new = header.group("path"), bool(header.group("new"))
+        i += 1
+        body: list[str] = []
+        inside_pair = False
+        closed = False
+
+        while i < n:
+            line = lines[i]
+            stripped = line.strip()
+
+            if not is_new and inside_pair:
+                # Content. A header or terminator here belongs to the code.
+                if stripped.startswith(_PAIR_CLOSE):
+                    inside_pair = False
+                body.append(line)
+                i += 1
+                continue
+
+            if stripped == _TERMINATOR:
+                closed = True
+                i += 1
+                break
+            if not is_new and _HEADER.match(line.rstrip("\r\n")):
+                # The next file starts here. Leave it for the outer loop.
+                closed = True
+                break
+            if not is_new and stripped.startswith(_PAIR_OPEN):
+                inside_pair = True
+
+            body.append(line)
+            i += 1
+
+        if is_new and not closed:
+            raise PatchError(
+                f"{path}: a NEW block must end with '--- end'. Its content is a "
+                f"whole file, so nothing else can say where the file stops."
+            )
+        blocks.append(_RawBlock(path=path, is_new=is_new, body="".join(body)))
+
+    return tuple(blocks)
+
+
+def _pairs_from_body(path: str, body: str) -> tuple[SearchReplace, ...]:
+    """The pairs in one edit block, refusing anything that is not one.
+
+    Text outside a pair is refused rather than ignored. The model wandering into
+    commentary mid-block is a signal, and silently dropping it is how a reply
+    that half-followed the format gets applied as though it fully did.
+    """
+    pairs: list[SearchReplace] = []
+    cursor = 0
+    for m in _PAIR.finditer(body):
+        stray = body[cursor:m.start()].strip()
+        if stray:
+            raise PatchError(
+                f"{path}: unexpected text between SEARCH/REPLACE pairs: "
+                f"{stray[:80]!r}. A block holds pairs and nothing else."
+            )
+        pairs.append(SearchReplace(search=m.group("search"), replace=m.group("replace")))
+        cursor = m.end()
+
+    if not pairs:
+        # Tell the two failures apart. A body full of code with no markers is
+        # the old whole-file habit; stray markers mean it tried and fumbled.
+        if _ANY_MARKER.search(body):
+            raise PatchError(
+                f"{path}: SEARCH/REPLACE markers are malformed. Each pair "
+                f"needs '<<<<<<< SEARCH', then '=======', then "
+                f"'>>>>>>> REPLACE', each alone on its line."
+            )
+        raise PatchError(
+            f"{path}: no SEARCH/REPLACE pairs. Whole-file rewrites are not "
+            f"accepted for a file that already exists: send only the text "
+            f"you are changing. Use '--- {path} NEW' only to create a file "
+            f"that does not exist yet."
+        )
+
+    trailing = body[cursor:].strip()
+    if trailing:
+        raise PatchError(
+            f"{path}: unexpected text after the last REPLACE: {trailing[:80]!r}. "
+            f"Send only the changes, with no commentary around them."
+        )
+    return tuple(pairs)
+
+
 def parse_blocks(reply: str) -> tuple[EditBlock, ...]:
     """Read the reply's structure. Pure: no repo, no filesystem, no I/O.
 
@@ -171,8 +336,18 @@ def parse_blocks(reply: str) -> tuple[EditBlock, ...]:
     if not reply.strip():
         raise PatchError("empty reply")
 
-    matches = list(_BLOCK.finditer(reply))
-    if not matches:
+    raw = _split_blocks(reply)
+    if not raw:
+        # Two different failures, and calling one by the other's name cost an
+        # afternoon on 27 July: a reply with perfect pairs and no terminator was
+        # reported as "replied with prose", which is the opposite of what
+        # happened and sends the reader looking in the wrong place.
+        if _ANY_MARKER.search(reply):
+            raise PatchError(
+                "SEARCH/REPLACE pairs were found but no '--- path' header line, "
+                "so there is no way to know which file they belong to. Start "
+                "each block with '--- path/to/file.py' on its own line."
+            )
         preview = reply.strip()[:200].replace("\n", " ")
         raise PatchError(
             f"no file blocks found. The model replied with prose instead of "
@@ -181,39 +356,19 @@ def parse_blocks(reply: str) -> tuple[EditBlock, ...]:
 
     blocks: list[EditBlock] = []
     seen: set[str] = set()
-    for m in matches:
-        path = m.group("path").strip()
-        if path in seen:
+    for r in raw:
+        if r.path in seen:
             # Two versions of one file is not a merge problem we should be
             # solving. It means the model contradicted itself.
-            raise PatchError(f"file given twice, cannot choose: {path}")
-        seen.add(path)
+            raise PatchError(f"file given twice, cannot choose: {r.path}")
+        seen.add(r.path)
 
-        body = m.group("body")
-        if m.group("new"):
-            blocks.append(EditBlock(path=path, is_new=True, content=body))
-            continue
-
-        pairs = tuple(
-            SearchReplace(search=p.group("search"), replace=p.group("replace"))
-            for p in _PAIR.finditer(body)
-        )
-        if not pairs:
-            # Tell the two failures apart. A body full of code with no markers is
-            # the old whole-file habit; stray markers mean it tried and fumbled.
-            if _ANY_MARKER.search(body):
-                raise PatchError(
-                    f"{path}: SEARCH/REPLACE markers are malformed. Each pair "
-                    f"needs '<<<<<<< SEARCH', then '=======', then "
-                    f"'>>>>>>> REPLACE', each alone on its line."
-                )
-            raise PatchError(
-                f"{path}: no SEARCH/REPLACE pairs. Whole-file rewrites are not "
-                f"accepted for a file that already exists: send only the text "
-                f"you are changing. Use '--- {path} NEW' only to create a file "
-                f"that does not exist yet."
+        if r.is_new:
+            blocks.append(EditBlock(path=r.path, is_new=True, content=r.body))
+        else:
+            blocks.append(
+                EditBlock(path=r.path, is_new=False, pairs=_pairs_from_body(r.path, r.body))
             )
-        blocks.append(EditBlock(path=path, is_new=False, pairs=pairs))
 
     return tuple(blocks)
 
