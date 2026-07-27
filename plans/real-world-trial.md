@@ -373,6 +373,53 @@ Two things follow, and the second is the useful one:
   could fix, at roughly $0.022 each. The design note in `checks.py` said this
   would happen; this is the first time it has been watched happening.
 
+## Case 5: funcy #108 again, to watch the gate work
+
+Not a new case. The same ticket, re-run with `--max-attempts 3` now that a failing
+acceptance check can stop the loop and send feedback back to the builder.
+
+**Why a known failure rather than a predicted one.** Case 4 was chosen because it
+looked likely to fail and then passed on the first attempt, so the gate had nothing
+to block and the question went unanswered. funcy #108 is measured, not predicted:
+its patch passes 205 tests and leaves `rcurry(str.endswith)` raising. Choosing a
+case whose L3 failure is already recorded is the difference between arranging for
+the experiment to happen and hoping it does.
+
+**Cost.** Attempt 1 rebuilds a byte-identical pack, so it replays from the store at
+$0. Only attempts 2 and 3 are paid, at roughly $0.005 each, and only if the gate
+does what it is supposed to.
+
+**Prediction 1: the gate fires on attempt 1.** Tests pass, the acceptance check
+fails, `_acceptance` routes to `_decide_fail`, and the run continues instead of
+reporting PASSED. This is the only prediction here that would embarrass the day's
+work if it failed, because it is the thing that was built and verified offline.
+
+**Prediction 2: attempt 2 does not fix it either, so the run ends `exhausted`.**
+The bug needs a fallback for callables with no introspectable signature, and the
+feedback names the criterion rather than the cause. A model that could not find it
+cold is not obviously helped by being told it failed. Stated as the more likely of
+the two, not as a confident call.
+
+**Prediction 3: cache stays at 0% on attempts 2 and 3.** The retest of case 4's
+untested prediction, and the reason funcy can answer it: attempt 1 edits
+`funcy/_inspect.py` and `funcy/funcs.py`, which are both selected, so the prefix
+collapses to `rules + tree`. funcy's pack is only ~3,700 tokens to begin with, so
+this case cannot distinguish "the prefix broke" from "the pack was always too
+small". **That is a weakness in the test and is stated rather than discovered
+later:** only a large-pack repository can separate those two explanations, and
+tabulate was the one that could have.
+
+**Prediction 4: the feedback reaches the model and is visible.** The retry's pack
+must contain the criterion text and must not contain the check command. Pinned by
+test already; this is whether it holds against a real pack.
+
+**Prediction 5: the regression comes back.** Attempt 2 rebuilds from the repo as it
+is now, which already contains attempt 1's `get_spec` regression. Nothing tells the
+builder about it, because gate 2 reports and does not gate. So the `self` leak is
+expected to survive into every subsequent attempt, and if the run ends `exhausted`
+it will still be sitting in the working tree. That is the cost of report-only,
+predicted in advance rather than excused afterwards.
+
 ## What would falsify the current design
 
 Stated now, so it cannot be softened later:
