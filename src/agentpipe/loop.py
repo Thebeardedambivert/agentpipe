@@ -17,6 +17,13 @@ The graph is deliberately tiny: two nodes and one conditional edge. The edge is
 the whole point, and the reason LangGraph was deferred to here rather than
 introduced at Layer 2 as a single node with nothing to decide.
 
+What counts as a pass, and why it is two questions rather than one. Validation
+asks "is the repo healthy" and the ticket's acceptance checks ask "is THIS work
+present". A suite the ticket's author did not write can only answer the first,
+so both have to agree before the loop reports a pass. That used to be a warning
+printed next to a pass; three real third-party runs turned the gap from
+theoretical into two of three, and `_acceptance` is where it closed.
+
 Durability, stated honestly: this loop runs in-process. Individual calls are
 idempotent at the seam, so a re-run does not pay twice for an identical call, but
 a process killed mid-loop restarts rather than resuming. The table-derived
@@ -36,7 +43,14 @@ from langgraph.graph import END, START, StateGraph
 from opentelemetry import trace as otel_trace
 
 from agentpipe.builder import BuildResult, run_builder
-from agentpipe.checks import CheckResult, Outcome, Verdict, assess, run_checks
+from agentpipe.checks import (
+    CheckResult,
+    GateDecision,
+    Outcome,
+    Verdict,
+    assess,
+    run_checks,
+)
 from agentpipe.judge import (
     CriterionOutcome,
     JudgeError,
@@ -110,12 +124,53 @@ class LoopResult:
 
     @property
     def total_cost_usd(self) -> Decimal:
-        # Include the judge's calls: with gating on they are a real part of the
-        # run's bill, and hiding them would be the quiet-cost trap this project
-        # exists to refuse.
+        """What this run's calls are worth at full price.
+
+        Include the judge's calls: with gating on they are a real part of the
+        run's bill, and hiding them would be the quiet-cost trap this project
+        exists to refuse.
+
+        Not the same as what was billed. See `billed_cost_usd`.
+        """
         build = sum((r.cost_usd for r in self.results), Decimal(0))
         judge = sum((j.cost_usd for j in self.judges), Decimal(0))
         return build + judge
+
+    @property
+    def billed_cost_usd(self) -> Decimal:
+        """What this run actually cost, with replayed calls excluded.
+
+        A replayed call is a real attempt whose answer came from the store
+        instead of the model, and `cost_usd` on that record carries the price the
+        original run paid. Summing it again reports money nobody spent.
+
+        Found on the funcy retry run of 27 July 2026, which reported $0.013910
+        and billed $0.009166: attempt 1 replayed from the run that first paid for
+        it. `evals.py` already separated these two after the same bug bit the eval
+        harness on its first `--repeat 5`. **The fix went in where the bug was
+        found rather than everywhere it lived**, and the loop kept overstating for
+        another four days. That is the transferable part of this comment.
+        """
+        build = sum(
+            (r.cost_usd for r in self.results if r.record.status != "replayed"),
+            Decimal(0),
+        )
+        judge = sum(
+            (j.cost_usd for j in self.judges
+             if j.record is not None and j.record.status != "replayed"),
+            Decimal(0),
+        )
+        return build + judge
+
+    @property
+    def replayed(self) -> int:
+        """Attempts answered from the store rather than the model.
+
+        Worth surfacing rather than merely subtracting: a replayed attempt is not
+        an independent draw. A loop whose every attempt replayed did not try
+        three times, it tried once and re-read the answer twice.
+        """
+        return sum(1 for r in self.results if r.record.status == "replayed")
 
 
 def _build_node(state: LoopState) -> dict[str, Any]:
@@ -161,8 +216,7 @@ def _validate_node(state: LoopState) -> dict[str, Any]:
 
     if all(r.outcome is Outcome.PASS for r in results):
         if not state["gate"]:
-            return {"verdict": "pass", "validation": results,
-                    "acceptance_warning": _acceptance_disagreement(state["ticket"], state["repo"])}
+            return _acceptance(state, results)
         # Tests pass. When gating, the judge gets the second say: it can send a
         # wrong-but-passing patch back to the builder.
         return _gate(state, results)
@@ -187,17 +241,23 @@ def _gate(state: LoopState, results: tuple[CheckResult, ...]) -> dict[str, Any]:
             state["judge_model"], written,
         )
     except JudgeError as exc:
-        return {"verdict": "pass", "validation": results,
-                "acceptance_warning": f"gate skipped: the judge's reply was unusable ({exc})"}
+        # Fail open on the judge, but not on the ticket's own checks: those are
+        # machine-run and cost nothing, so a broken judge is no reason to skip them.
+        return _acceptance(
+            state, results,
+            note=f"gate skipped: the judge's reply was unusable ({exc})",
+        )
 
     if judge.verdict is JudgeVerdict.BLOCK:
         out = _decide_fail(state, _judge_feedback(judge), results)
         out["judges"] = [judge]
         return out
 
-    # PASS or UNGUARDED: a real pass, with the judge recorded for cost and report.
-    return {"verdict": "pass", "validation": results, "judges": [judge],
-            "acceptance_warning": _acceptance_disagreement(state["ticket"], state["repo"])}
+    # PASS or UNGUARDED: the judge is content, so the ticket's own checks get the
+    # last word. The judge is recorded either way, for cost and for the report.
+    out = _acceptance(state, results)
+    out["judges"] = [judge]
+    return out
 
 
 def _judge_feedback(judge: JudgeResult) -> str:
@@ -226,21 +286,92 @@ def _decide_fail(
     }
 
 
-def _acceptance_disagreement(ticket: Ticket, repo: Repo) -> Optional[str]:
-    """Validation passed. Do the ticket's acceptance checks agree?
+def _acceptance_decision(ticket: Ticket, repo: Repo) -> Optional[GateDecision]:
+    """The ticket's own acceptance checks, run against the tree as it is now.
 
-    A warning, not a gate. Validation (pytest) passing does not prove this
-    ticket's specific work was done; that is the stale-ticket lesson. If the
-    ticket carries acceptance checks and they do not pass, the loop has produced
-    green tests over unfinished work. Surfacing it here makes the gap visible;
-    Layer 6's judge is what actually closes it.
+    None when the ticket carries none. That is deliberately not the same value as
+    a satisfied decision: `assess` reports PROCEED for a ticket with no checks,
+    and passing that through unexamined would send every check-less ticket into a
+    retry it can never satisfy. Unguarded is a third state, and collapsing it into
+    either of the other two is this project's signature bug.
     """
     if not ticket.checks:
         return None
-    decision = assess(ticket, repo.root)
-    if decision.verdict is Verdict.SATISFIED:
-        return None
-    return f"validation passed but acceptance checks did not: {decision.reason}"
+    return assess(ticket, repo.root)
+
+
+def _acceptance(
+    state: LoopState,
+    results: tuple[CheckResult, ...],
+    note: Optional[str] = None,
+) -> dict[str, Any]:
+    """Validation passed. Now ask the ticket's own checks, and act on the answer.
+
+    This used to attach a warning and pass anyway, on the argument that Layer 6's
+    judge was what would really close the gap. Three real runs on 27 July 2026
+    settled it: boltons #301, toolz #626 and funcy #108 all had green test suites,
+    two of the three had not done the work, and the loop called all three PASSED.
+    The acceptance check ran, failed, and was printed. Nothing read it. The sensor
+    was never missing; the wire from the sensor to the brake was.
+
+    So the checks decide now. The two questions are genuinely different and only
+    the second one is what the loop was asked: validation answers "is the repo
+    healthy", and a ticket's acceptance check answers "is THIS work present".
+    A suite the ticket's author did not write cannot answer the second.
+
+    Scored against those three runs before it was written: BLOCK, PASS, BLOCK,
+    which matches the hand-marked truth exactly, where the old behaviour scored
+    one of three. See tests/test_loop.py.
+    """
+    decision = _acceptance_decision(state["ticket"], state["repo"])
+
+    if decision is None or decision.verdict is Verdict.SATISFIED:
+        return {"verdict": "pass", "validation": results, "acceptance_warning": note}
+
+    if decision.verdict is Verdict.BROKEN:
+        # A check that cannot run is a broken ticket, not unfinished work, and no
+        # amount of rebuilding fixes it. Same three-state contract as validation.
+        return {
+            "verdict": "blocked",
+            "validation": results,
+            "acceptance_warning": _note_and(note, decision.reason),
+        }
+
+    # PROCEED: the checks say the work is not there. Treat it exactly as a failing
+    # test, because it is the same fact arriving through a different door.
+    out = _decide_fail(state, _acceptance_feedback(state["ticket"], decision), results)
+    out["acceptance_warning"] = _note_and(note, decision.reason)
+    return out
+
+
+def _acceptance_feedback(ticket: Ticket, decision: GateDecision) -> str:
+    """Failing acceptance checks, expressed as the criteria they belong to.
+
+    The criterion's text, never the check command, and that is the load-bearing
+    choice. Checks are deliberately absent from the pack (`pack.py` sends only
+    each criterion's text), so the model has never seen the command it is scored
+    by. Hand it over as feedback and the cheapest way to go green stops being
+    "do the work" and becomes "satisfy that one command", which is
+    green-tests-over-real-work one level up: the exact failure this gate exists
+    to catch, recreated by the gate itself.
+    """
+    checked = [c for c in ticket.acceptance if c.check]
+    failed = [
+        c.text
+        for c, r in zip(checked, decision.results)
+        if r.outcome is not Outcome.PASS
+    ]
+    return "\n".join(
+        [
+            "Your tests passed, but the ticket's acceptance criteria are not met "
+            "yet. These are still outstanding:"
+        ]
+        + [f"- {t}" for t in failed]
+    )
+
+
+def _note_and(note: Optional[str], reason: str) -> str:
+    return f"{note}; {reason}" if note else reason
 
 
 def _router(state: LoopState) -> str:
@@ -364,12 +495,26 @@ def _resume(ticket, repo, client, max_attempts, feedback_max_chars):
 
     results = run_checks(ticket.validation, repo.root)
     if all(r.outcome is Outcome.PASS for r in results):
-        # The crash happened after the fix landed. Nothing left to do, nothing to
-        # pay: the repo already satisfies the ticket.
-        return LoopResult(
-            "pass", prior.attempt_index, (), results,
-            _acceptance_disagreement(ticket, repo),
-        )
+        # Tests pass, so the crash may have happened after the fix landed. Ask the
+        # ticket's own checks before believing that, exactly as a fresh run does.
+        # Without this, resume would be the one door left open into the PASSED-on-
+        # unfinished-work hole, and a hole with one door is still a hole.
+        decision = _acceptance_decision(ticket, repo)
+        if decision is None or decision.verdict is Verdict.SATISFIED:
+            # Nothing left to do, nothing to pay: the repo satisfies the ticket.
+            return LoopResult("pass", prior.attempt_index, (), results, None)
+        if decision.verdict is Verdict.BROKEN:
+            return LoopResult(
+                "blocked", prior.attempt_index, (), results, decision.reason
+            )
+        # Green tests over work that is not there. Carry on rather than declaring
+        # a crashed run finished, with the criteria as the feedback.
+        start_attempt = prior.attempt_index + 1
+        if start_attempt > max_attempts:
+            return LoopResult(
+                "exhausted", prior.attempt_index, (), results, decision.reason
+            )
+        return start_attempt, _acceptance_feedback(ticket, decision)
 
     start_attempt = prior.attempt_index + 1
     if start_attempt > max_attempts:
@@ -388,11 +533,18 @@ def _reapply_recorded_reply(prior: CallRecord, ticket: Ticket, repo: Repo) -> No
     redo it. Idempotent: if the work already landed, this rewrites identical
     bytes. An attempt whose reply was not applicable (the model returned prose)
     has nothing to recover, and that is fine; the loop rebuilds from real state.
+
+    That tolerance now covers a second case, and it is why this is a `try` rather
+    than a bare call. Replies recorded before the search/replace change are in the
+    old whole-file format, which the parser refuses outright. Those runs lose the
+    free re-apply and fall back to rebuilding from the repo, which is exactly what
+    this function does when it cannot recover anything. Old rows degrade; nothing
+    crashes.
     """
     if prior.status not in ("ok", "replayed") or not prior.content:
         return
     try:
-        edits = parse_edits(prior.content)
+        edits = parse_edits(prior.content, repo)
         apply_edits(repo, edits, allowed=ticket.files_hint or None, dry_run=False)
     except PatchError:
         return
@@ -403,29 +555,44 @@ def report_loop(result: LoopResult) -> str:
     headline = {
         "pass": "PASSED",
         "exhausted": "GAVE UP (hit the attempt limit)",
-        "blocked": "STOPPED (a validation command could not run)",
+        "blocked": "STOPPED (a command could not run)",
     }.get(result.verdict, result.verdict.upper())
 
     lines = [
         f"loop       {headline}",
         f"attempts   {result.attempts}",
-        f"cost       ${result.total_cost_usd}",
     ]
+    # Show what was billed, and show full price beside it only when they differ.
+    # One number here would be a lie in whichever direction it was chosen.
+    if result.replayed:
+        lines.append(
+            f"cost       ${result.billed_cost_usd} billed "
+            f"(${result.total_cost_usd} at full price; "
+            f"{result.replayed} attempt(s) replayed free)"
+        )
+    else:
+        lines.append(f"cost       ${result.billed_cost_usd}")
+
     for i, r in enumerate(result.results, start=1):
         u = r.record.usage
+        replayed = r.record.status == "replayed"
         lines.append(
             f"  attempt {i}: {r.record.attempt_kind:<16} "
             f"in={u.input_tokens:,} out={u.output_tokens:,} "
             f"cache={u.cache_hit_rate:.0%} ${r.cost_usd}"
+            + ("   replayed, not billed" if replayed else "")
         )
 
-    if result.verdict != "pass":
+    # Only when validation is actually what failed. A run stopped by the acceptance
+    # gate has an all-green validation list, and heading an empty block "last
+    # validation output" reads as a test failure that did not happen.
+    failed_validation = [r for r in result.validation if r.outcome is not Outcome.PASS]
+    if result.verdict != "pass" and failed_validation:
         lines += ["", "last validation output:"]
-        for r in result.validation:
-            if r.outcome is not Outcome.PASS:
-                lines.append(f"  [{r.outcome.value}] {r.command}")
-                if r.output:
-                    lines.append("    " + r.output.replace("\n", "\n    "))
+        for r in failed_validation:
+            lines.append(f"  [{r.outcome.value}] {r.command}")
+            if r.output:
+                lines.append("    " + r.output.replace("\n", "\n    "))
 
     # The gate's verdict, when the run was gated. On a BLOCK (whether the loop went
     # on to pass or exhausted) show which criteria it kept flagging.
@@ -438,6 +605,10 @@ def report_loop(result: LoopResult) -> str:
                     lines.append(f"  [{v.outcome.value}] {v.criterion}: {v.reason}")
 
     if result.acceptance_warning:
-        lines += ["", f"WARNING: {result.acceptance_warning}"]
+        # On a pass this is a note about something that did not stop the run. On a
+        # failure it IS why the run stopped, and calling that a warning would
+        # understate it, so it is labelled for what it is in each case.
+        lines += ["", f"{'NOTE' if result.ok else 'REASON'}: "
+                      f"{result.acceptance_warning}"]
 
     return "\n".join(lines)

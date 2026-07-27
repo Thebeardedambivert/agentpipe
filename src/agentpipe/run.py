@@ -13,6 +13,13 @@ import argparse
 import sys
 
 from agentpipe.builder import report, run_builder
+from agentpipe.characterise import (
+    CharacteriseError,
+    compare,
+    modules_for,
+    record,
+)
+from agentpipe.characterise import report as characterise_report
 from agentpipe.checks import Verdict, assess
 from agentpipe.config import ModelMap
 from agentpipe.findings import (
@@ -70,6 +77,13 @@ def main() -> int:
                          "BLOCK is fed back to the builder to try again, bounded by "
                          "--max-attempts. Needs --max-attempts > 1 for retries. "
                          "Layer 6 Stage 2.")
+    ap.add_argument("--characterise", action="store_true",
+                    help="record the ticket's validation suite before and after "
+                         "the patch, and report any behaviour that changed but "
+                         "was not asked for. Catches the funcy #108 case: green "
+                         "tests, bug unfixed, and an unrelated silent regression. "
+                         "Opt-in: it runs the suite twice more. Needs pytest and "
+                         "a ticket with a Files section.")
     ap.add_argument("--models", default=None, metavar="PATH",
                     help="JSON file of role -> model overrides for --fix (or set "
                          "AGENTPIPE_MODELS). Unset means every role uses --model.")
@@ -155,6 +169,11 @@ def main() -> int:
                 _review_fix(args, ticket, repo, client, written, finding_store)
         return 0 if loop_result.ok else 1
 
+    # Taken before the patch lands, because afterwards the old behaviour is gone.
+    # The watched set is the ticket's Files section, which is knowable now and is
+    # also exactly what apply_edits will allow the patch to touch.
+    before = _characterise_before(args, ticket, repo)
+
     try:
         result = run_builder(
             ticket, repo, client, args.model,
@@ -180,6 +199,7 @@ def main() -> int:
     print()
     print(report(result, repo, dry_run=not args.apply))
     print()
+    _characterise_after(args, ticket, repo, before, result.written)
     if args.review or args.fix or args.judge:
         if args.apply and result.written:
             if args.judge:
@@ -193,6 +213,53 @@ def main() -> int:
             print("note: --review/--fix/--judge need files on disk. Add --apply, or "
                   "run the loop with --max-attempts > 1.\n")
     return 0
+
+
+def _characterise_before(args, ticket, repo):
+    """Snapshot the behaviour of the ticket's declared files, before the patch.
+
+    Returns None when characterisation is off or cannot be done, and says which
+    out loud. A silent None here would be read downstream as "nothing changed",
+    which is the failure this whole module exists to prevent.
+    """
+    if not args.characterise:
+        return None
+    if not args.apply:
+        print("note: --characterise needs --apply; a dry run changes nothing to "
+              "compare.\n")
+        return None
+
+    modules = modules_for(ticket.files_hint)
+    if not modules:
+        print("note: --characterise needs a ticket with a Files section naming "
+              "Python modules; there is nothing to watch.\n")
+        return None
+
+    try:
+        observations = record(repo.root, modules, ticket.validation[0])
+    except CharacteriseError as exc:
+        print(f"characterise skipped: {exc}\n")
+        return None
+    print(f"characterise: {len(observations):,} calls recorded before the patch "
+          f"({', '.join(modules)})\n")
+    return observations
+
+
+def _characterise_after(args, ticket, repo, before, written) -> None:
+    """Record again and report what changed but was not asked for.
+
+    Advisory, and it never fails the run: this is a sensor, and a sensor that can
+    stop the machine is the meter-kills-the-run bug in a new place.
+    """
+    if before is None or not written:
+        return
+    try:
+        after = record(repo.root, modules_for(ticket.files_hint), ticket.validation[0])
+    except CharacteriseError as exc:
+        print(f"characterise skipped after the patch: {exc}\n")
+        return
+    print(characterise_report(compare(before, after), recorded=len(before)))
+    print()
 
 
 def _judge(args, ticket, repo, client, files) -> None:

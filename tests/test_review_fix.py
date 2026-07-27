@@ -42,9 +42,15 @@ VALIDATE_HAS_42 = (
     'python -c "import sys; sys.exit(0 if \'42\' in open(\'answer.txt\').read() else 1)"'
 )
 
-# Fixer replies, in the --- file block format FIX_RULES asks for.
-def patch(content: str) -> str:
-    return f"--- answer.txt\n{content}\n--- end"
+# Fixer replies, in the search/replace format FIX_RULES asks for. The fixer now
+# quotes what it is changing rather than resending the file, so a patch needs to
+# know the text it is replacing, not just what to put there.
+def patch(old: str, new: str, path: str = "answer.txt") -> str:
+    return (
+        f"--- {path}\n"
+        f"<<<<<<< SEARCH\n{old}\n=======\n{new}\n>>>>>>> REPLACE\n"
+        f"--- end"
+    )
 
 PROSE = "I had a look and it seems fine to me."
 
@@ -147,7 +153,7 @@ FILES = ("answer.txt",)
 def test_a_good_fix_is_kept(repo):
     """Validation still passes after the fix, so it stays and the finding is fixed."""
     r = repo("7")  # non-empty, so validation passes before review
-    client, fake, models = make([review(high()), review()], [patch("42")])
+    client, fake, models = make([review(high()), review()], [patch("7", "42")])
     result = run_review_fix(_ticket(VALIDATE_NONEMPTY), r, client, models, FILES,
                             max_rounds=3)
     assert result.stopped == "clean"
@@ -159,7 +165,7 @@ def test_a_breaking_fix_is_reverted_byte_for_byte(repo):
     """The fix drops '42' and validation now fails, so it is undone and the file is
     exactly what it was. This is the guarantee the whole stage exists for."""
     r = repo("42 start")  # contains 42, so validation passes before review
-    client, fake, models = make([review(high())], [patch("no number here")])
+    client, fake, models = make([review(high())], [patch("42 start", "no number here")])
     result = run_review_fix(_ticket(VALIDATE_HAS_42), r, client, models, FILES,
                             max_rounds=3)
     assert [rd.outcome for rd in result.rounds] == ["reverted"]
@@ -185,7 +191,7 @@ def test_snapshot_and_restore_delete_a_created_file(repo):
 
 def test_clean_review_does_nothing(repo):
     r = repo("42")
-    client, fake, models = make([review()], [patch("x")])
+    client, fake, models = make([review()], [patch("42", "x")])
     result = run_review_fix(_ticket(VALIDATE_NONEMPTY), r, client, models, FILES)
     assert result.stopped == "clean"
     assert result.rounds == ()
@@ -195,7 +201,7 @@ def test_clean_review_does_nothing(repo):
 def test_only_low_findings_are_left_alone(repo):
     """min_severity defaults to medium, so a lone low nitpick is not acted on."""
     r = repo("42")
-    client, fake, models = make([review(LOW)], [patch("x")])
+    client, fake, models = make([review(LOW)], [patch("42", "x")])
     result = run_review_fix(_ticket(VALIDATE_NONEMPTY), r, client, models, FILES)
     assert result.stopped == "settled"
     assert result.rounds == ()
@@ -204,7 +210,7 @@ def test_only_low_findings_are_left_alone(repo):
 
 def test_a_low_finding_is_fixed_when_the_threshold_is_low(repo):
     r = repo("7")
-    client, fake, models = make([review(LOW), review()], [patch("42")])
+    client, fake, models = make([review(LOW), review()], [patch("7", "42")])
     result = run_review_fix(_ticket(VALIDATE_NONEMPTY), r, client, models, FILES,
                             min_severity="low")
     assert [rd.outcome for rd in result.rounds] == ["fixed"]
@@ -214,7 +220,8 @@ def test_round_cap_is_respected(repo):
     """Distinct findings every round, all fixed; the run stops at max_rounds."""
     r = repo("start")
     reviews = [review(high("a")), review(high("b")), review(high("c"))]
-    fixes = [patch("aa"), patch("bb"), patch("cc")]
+    # each round edits what the previous round left behind
+    fixes = [patch("start", "aa"), patch("aa", "bb"), patch("bb", "cc")]
     client, fake, models = make(reviews, fixes)
     result = run_review_fix(_ticket(VALIDATE_NONEMPTY), r, client, models, FILES,
                             max_rounds=2)
@@ -227,7 +234,7 @@ def test_round_cap_is_respected(repo):
 
 def test_malformed_review_stops_without_fixing(repo):
     r = repo("42")
-    client, fake, models = make([PROSE], [patch("x")])
+    client, fake, models = make([PROSE], [patch("42", "x")])
     result = run_review_fix(_ticket(VALIDATE_NONEMPTY), r, client, models, FILES)
     assert result.stopped == "review_unparseable"
     assert result.rounds == ()
@@ -251,7 +258,7 @@ def test_the_fixer_runs_on_the_routed_model_and_is_recorded(repo):
     call is recorded as role=fixer / review_fix so Stage 3 can attribute it."""
     r = repo("7")
     client, fake, models = make(
-        [review(high()), review()], [patch("42")],
+        [review(high()), review()], [patch("7", "42")],
         base="base-m", overrides={"reviewer": "rev-m", "fixer": "fix-m"},
     )
     result = run_review_fix(_ticket(VALIDATE_NONEMPTY), r, client, models, FILES)
@@ -272,9 +279,11 @@ VALIDATE_BOTH_42 = (
 )
 
 
-def patch_files(**files: str) -> str:
-    """A fixer reply that rewrites several files at once."""
-    return "\n".join(f"--- {name}\n{content}\n--- end" for name, content in files.items())
+def patch_files(**files: tuple) -> str:
+    """A fixer reply that edits several files at once. Each value is (old, new)."""
+    return "\n\n".join(
+        patch(old, new, path=name) for name, (old, new) in files.items()
+    )
 
 
 def high_multi(issue: str = "a.txt and b.txt disagree") -> dict:
@@ -298,7 +307,7 @@ MULTI = ("a.txt", "b.txt")
 def test_a_multi_file_fix_is_kept(repo_multi):
     """One round's fix rewrites both files; validation still passes, so both stay."""
     r = repo_multi({"a.txt": "42", "b.txt": "42"})
-    fixes = [patch_files(**{"a.txt": "42 done", "b.txt": "42 done"})]
+    fixes = [patch_files(**{"a.txt": ("42", "42 done"), "b.txt": ("42", "42 done")})]
     client, fake, models = make([review(high_multi()), review()], fixes)
     result = run_review_fix(_ticket(VALIDATE_BOTH_42), r, client, models, MULTI,
                             max_rounds=3)
@@ -311,7 +320,8 @@ def test_a_breaking_multi_file_fix_reverts_every_file(repo_multi):
     """The fix edits both files and drops '42' from b.txt, so validation fails and
     BOTH files are restored byte for byte, not just the one the finding named."""
     r = repo_multi({"a.txt": "42 alpha", "b.txt": "42 beta"})
-    fixes = [patch_files(**{"a.txt": "42 changed", "b.txt": "no number"})]
+    fixes = [patch_files(**{"a.txt": ("42 alpha", "42 changed"),
+                            "b.txt": ("42 beta", "no number")})]
     client, fake, models = make([review(high_multi())], fixes)
     result = run_review_fix(_ticket(VALIDATE_BOTH_42), r, client, models, MULTI,
                             max_rounds=3)

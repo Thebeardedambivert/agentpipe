@@ -56,11 +56,17 @@ FIX_RULES = """You are a careful software engineer fixing one specific problem i
 
 A reviewer flagged the single issue below. Make the smallest change that resolves exactly that issue. Do not refactor, do not fix anything else, do not touch files you were not given. The tests must still pass after your change.
 
-Reply with the complete new contents of each file you change, in this format:
+Send only the text you are changing, never a whole file. Quote the exact text to find and what to put there instead:
 
 --- path/to/file.py
-<the full file contents>
+<<<<<<< SEARCH
+the exact existing text, copied character for character
+=======
+what it should say instead
+>>>>>>> REPLACE
 --- end
+
+The SEARCH text must match the file exactly, including indentation, and must appear only once. If it appears more than once, include surrounding lines until it is unique.
 
 Nothing else. No explanation, no markdown fences around the whole reply."""
 
@@ -233,7 +239,7 @@ def run_review_fix(
         )
 
         try:
-            edits = parse_edits(fix_record.content)
+            edits = parse_edits(fix_record.content, repo)
             # allowed = the reviewed files only, so the fixer cannot wander outside
             # what we snapshotted and leave a change the revert cannot undo.
             apply_edits(repo, edits, allowed=files, dry_run=False)

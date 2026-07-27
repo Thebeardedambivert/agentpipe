@@ -17,12 +17,13 @@ import json
 import subprocess
 import uuid
 from decimal import Decimal
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from agentpipe.judge import JudgeVerdict
-from agentpipe.loop import run_loop
+from agentpipe.loop import report_loop, run_loop
 from agentpipe.repo import Repo
 from agentpipe.telemetry import (
     CallRecord,
@@ -44,9 +45,30 @@ VALIDATE_IS_42 = (
 # A validation command that cannot give an answer: exit 2 is "broken", not "fail".
 VALIDATE_BROKEN = 'python -c "import sys; sys.exit(2)"'
 
-# Model replies, in the file-block format RULES asks for.
-PATCH_42 = "--- answer.txt\n42\n--- end"
-PATCH_7 = "--- answer.txt\n7\n--- end"
+# Model replies, in the format RULES asks for.
+#
+# answer.txt never exists at the start of a run, so a first attempt CREATES it and
+# any retry EDITS what the previous attempt wrote. That asymmetry is not an
+# artefact of the tests, it is the real shape of the loop: attempt 2 rebuilds its
+# pack from the repo as it is now, so it sees attempt 1's file and quotes from it.
+CREATE_42 = "--- answer.txt NEW\n42\n--- end"
+CREATE_7 = "--- answer.txt NEW\n7\n--- end"
+FIX_7_TO_42 = (
+    "--- answer.txt\n<<<<<<< SEARCH\n7\n=======\n42\n>>>>>>> REPLACE\n--- end"
+)
+# A change that changes nothing: applies cleanly, leaves the answer wrong. For the
+# runs that must keep failing until the budget is spent.
+STILL_7 = (
+    "--- answer.txt\n<<<<<<< SEARCH\n7\n=======\n7\n>>>>>>> REPLACE\n--- end"
+)
+# The same idea for the acceptance-gate tests, where validation is happy with any
+# content and only the ticket's own check disagrees.
+STILL_42 = (
+    "--- answer.txt\n<<<<<<< SEARCH\n42\n=======\n42\n>>>>>>> REPLACE\n--- end"
+)
+FIX_42_TO_999 = (
+    "--- answer.txt\n<<<<<<< SEARCH\n42\n=======\n999\n>>>>>>> REPLACE\n--- end"
+)
 PROSE = "Sure, I can help you with that!"
 
 
@@ -124,7 +146,7 @@ def repo(tmp_path):
 
 
 def test_passes_on_first_try(repo):
-    client, fake = client_for([PATCH_42])
+    client, fake = client_for([CREATE_42])
     r = run_loop(_ticket(VALIDATE_IS_42), repo, client, "fake", max_attempts=3)
     assert r.verdict == "pass"
     assert r.attempts == 1
@@ -133,7 +155,7 @@ def test_passes_on_first_try(repo):
 
 def test_fails_then_passes_and_feeds_the_failure_back(repo):
     """The heart of Layer 3: attempt 2 is built with attempt 1's failure in hand."""
-    client, fake = client_for([PATCH_7, PATCH_42])
+    client, fake = client_for([CREATE_7, FIX_7_TO_42])
     r = run_loop(_ticket(VALIDATE_IS_42), repo, client, "fake", max_attempts=3)
     assert r.verdict == "pass"
     assert r.attempts == 2
@@ -145,7 +167,7 @@ def test_fails_then_passes_and_feeds_the_failure_back(repo):
 
 
 def test_exhausts_when_never_fixed(repo):
-    client, fake = client_for([PATCH_7])  # always wrong
+    client, fake = client_for([CREATE_7, STILL_7])  # never gets there
     r = run_loop(_ticket(VALIDATE_IS_42), repo, client, "fake", max_attempts=3)
     assert r.verdict == "exhausted"
     assert r.attempts == 3
@@ -155,7 +177,7 @@ def test_exhausts_when_never_fixed(repo):
 def test_broken_validation_stops_loudly_without_burning_the_budget(repo):
     """Exit 2 is a broken command, not a failing test. The model can't fix pytest
     not being installed, so retrying would just waste money."""
-    client, fake = client_for([PATCH_42])
+    client, fake = client_for([CREATE_42])
     r = run_loop(_ticket(VALIDATE_BROKEN), repo, client, "fake", max_attempts=3)
     assert r.verdict == "blocked"
     assert r.attempts == 1
@@ -164,7 +186,7 @@ def test_broken_validation_stops_loudly_without_burning_the_budget(repo):
 
 def test_unparseable_reply_is_a_recoverable_attempt(repo):
     """A prose reply is a failed attempt the model can fix, not a crash."""
-    client, fake = client_for([PROSE, PATCH_42])
+    client, fake = client_for([PROSE, CREATE_42])
     r = run_loop(_ticket(VALIDATE_IS_42), repo, client, "fake", max_attempts=3)
     assert r.verdict == "pass"
     assert r.attempts == 2
@@ -174,7 +196,7 @@ def test_unparseable_reply_is_a_recoverable_attempt(repo):
 def test_exhaustion_does_not_trip_the_recursion_limit(repo):
     """A longer run must stop on our 'exhausted' verdict, not LangGraph's
     GraphRecursionError surfacing from underneath."""
-    client, _ = client_for([PATCH_7])
+    client, _ = client_for([CREATE_7, STILL_7])
     r = run_loop(_ticket(VALIDATE_IS_42), repo, client, "fake", max_attempts=5)
     assert r.verdict == "exhausted"
     assert r.attempts == 5
@@ -191,25 +213,145 @@ def test_pack_is_deterministic_across_rebuilds(repo):
     assert build(t, repo, selected).hash == build(t, repo, selected).hash
 
 
-def test_green_validation_but_failing_acceptance_warns(repo):
-    """Validation passing is not proof the ticket's work was done.
+# Validation that only proves the file exists, which is the shape of a real test
+# suite: it answers "is the repo healthy", never "was this ticket's work done".
+VALIDATE_EXISTS_ONLY = (
+    'python -c "import os, sys; sys.exit(0 if os.path.exists(\'answer.txt\') else 1)"'
+)
+# The ticket's own definition of done, which the patch below does not meet.
+CHECK_IS_999 = (
+    'python -c "import sys; sys.exit(0 if open(\'answer.txt\').read().strip() '
+    "== '999' else 1)\""
+)
 
-    Here validation only checks the file exists, but the acceptance check demands
-    content '999'. The patch writes '42': tests go green, acceptance does not, and
-    the loop passes while warning that the two disagree.
+
+def test_green_tests_over_unfinished_work_no_longer_report_passed(repo):
+    """boltons #301 and funcy #108, 27 July 2026. Named because it was paid for.
+
+    Three real runs against third-party repositories, one attempt each on
+    gpt-5.4-mini. All three ended with a green test suite. Two of the three had
+    not done the work: boltons' rebuilt function still returned None, funcy's
+    rcurry still raised. The loop reported PASSED for all three.
+
+    The acceptance check was not missing. It ran, it failed, and the loop printed
+    it beside the word PASSED as a warning. Nothing acted on it. The sensor was
+    wired to a printer.
+
+    Same shape here: validation only proves the file exists, the ticket demands
+    '999', the patch writes '42' forever. The loop must not call that a pass.
     """
-    validate_exists = (
-        'python -c "import os, sys; sys.exit(0 if os.path.exists(\'answer.txt\') else 1)"'
-    )
-    check_999 = (
-        'python -c "import sys; sys.exit(0 if open(\'answer.txt\').read().strip() == \'999\' else 1)"'
-    )
-    t = _ticket(validate_exists, check=check_999)
-    client, _ = client_for([PATCH_42])
+    t = _ticket(VALIDATE_EXISTS_ONLY, check=CHECK_IS_999)
+    client, fake = client_for([CREATE_42, STILL_42])
     r = run_loop(t, repo, client, "fake", max_attempts=2)
-    assert r.verdict == "pass"
+
+    assert r.verdict == "exhausted"          # not "pass", which is the whole point
+    assert r.attempts == 2                   # it retried rather than shrugging
+    assert fake.calls == 2
+    # And the run says why it stopped, in the ticket's words.
     assert r.acceptance_warning is not None
-    assert "acceptance" in r.acceptance_warning
+
+
+def test_a_failing_acceptance_check_feeds_back_the_criterion_not_the_command(repo):
+    """What the builder is told when acceptance fails, and what it is not told.
+
+    The criterion's text goes back; the check command never does. A model handed
+    the exact command it is scored by can satisfy that one command instead of the
+    ticket, which is green-tests-over-real-work rebuilt inside the gate meant to
+    stop it. Checks are absent from the pack for the same reason (pack.py sends
+    only each criterion's text), and this pins that they stay absent here too.
+    """
+    t = _ticket(VALIDATE_EXISTS_ONLY, check=CHECK_IS_999)
+    client, fake = client_for([CREATE_42, FIX_42_TO_999])
+    r = run_loop(t, repo, client, "fake", max_attempts=3)
+
+    assert r.verdict == "pass"               # the retry actually fixed it
+    assert r.attempts == 2
+    retry_pack = fake.messages[1][1]["content"]
+    assert "answer.txt has the right content" in retry_pack   # the criterion
+    # '999' appears only inside the check command, so its absence is proof the
+    # command did not travel with the criterion.
+    assert "999" not in retry_pack
+
+
+def test_a_broken_acceptance_check_stops_the_run_instead_of_retrying(repo):
+    """A check that cannot run is a broken ticket, not unfinished work.
+
+    Exit 2 from an acceptance check means the instrument is broken, and rebuilding
+    cannot fix an instrument. Same three-state contract validation already uses,
+    applied on the other side of the pass.
+    """
+    t = _ticket(VALIDATE_EXISTS_ONLY, check='python -c "import sys; sys.exit(2)"')
+    client, fake = client_for([CREATE_42])
+    r = run_loop(t, repo, client, "fake", max_attempts=3)
+
+    assert r.verdict == "blocked"
+    assert fake.calls == 1                   # the budget was not burned on it
+
+
+def test_a_ticket_with_no_acceptance_checks_still_passes_on_green_tests(repo):
+    """Unguarded is a third state, and it must not be read as "not done".
+
+    `assess` reports PROCEED for a ticket carrying no checks, so passing that
+    through unexamined would send every check-less ticket into a retry it can
+    never satisfy. This pins the distinction that keeps the gate from eating them.
+    """
+    client, fake = client_for([CREATE_42])
+    r = run_loop(_ticket(VALIDATE_IS_42), repo, client, "fake", max_attempts=3)
+
+    assert r.verdict == "pass"
+    assert r.attempts == 1
+    assert fake.calls == 1
+
+
+def test_a_replayed_attempt_is_not_counted_as_spend(repo):
+    """funcy #108 retry, 27 July 2026. report_loop said $0.013910, $0.009166 was
+    billed.
+
+    Attempt 1 rebuilt a byte-identical pack, so the seam answered it from the
+    store. That is a real attempt whose answer came from a previous run, and
+    `cost_usd` on the replayed record carries the price that run paid. Summing it
+    again reports money nobody spent.
+
+    `evals.py` separated billed from full price after the identical bug hit the
+    eval harness on its first --repeat 5. The fix went in where the bug was found
+    and not everywhere it lived, so the loop went on overstating for another four
+    days. That is the part worth remembering: a bug of this shape is a family, and
+    the first sighting is rarely the only member.
+
+    Overstating is the friendlier direction. It is still a number that looked
+    right, was computed correctly, and answered a different question than the one
+    being asked.
+    """
+    store = InMemoryCallStore()
+    run = "run-replay-cost"
+    # A prior run already paid for this exact pack. Reconstructing the key the way
+    # the seam does is the point: this must be a genuine replay, not a stub.
+    fake = SequencedFakeOpenAI([CREATE_42])
+    first = MeteredClient(store=store, prices=PRICES, client=fake, run_id=run)
+    paid = run_loop(_ticket(VALIDATE_IS_42), repo, first, "fake", max_attempts=1)
+    assert paid.replayed == 0
+    assert paid.billed_cost_usd == paid.total_cost_usd  # nothing replayed yet
+    assert paid.billed_cost_usd > 0
+
+    # Same ticket, same repo state, a different run: the pack hash matches, so the
+    # seam replays and the model is never called again. answer.txt is untracked,
+    # so `git checkout` will not remove it and the NEW block would rightly refuse
+    # to overwrite a file that now exists. Put the tree back as it started.
+    Path(repo.root, "answer.txt").unlink(missing_ok=True)
+    second_fake = SequencedFakeOpenAI([CREATE_42])
+    second = MeteredClient(store=store, prices=PRICES, client=second_fake,
+                           run_id="run-replay-cost-2")
+    again = run_loop(_ticket(VALIDATE_IS_42), repo, second, "fake", max_attempts=1)
+
+    assert second_fake.calls == 0            # genuinely replayed, not re-called
+    assert again.replayed == 1
+    assert again.total_cost_usd > 0          # full price still reported
+    assert again.billed_cost_usd == 0        # and nothing was billed for it
+
+    # The report must not present the full price as the bill.
+    text = report_loop(again)
+    assert "$0 billed" in text
+    assert "replayed free" in text
 
 
 # --- resume: continuing a crashed run -------------------------------------
@@ -230,8 +372,8 @@ def test_resume_recovers_landed_work_for_free(repo):
     reply, finds the ticket already satisfied, and spends nothing: no new call."""
     store = InMemoryCallStore()
     run = "run-resume-landed"
-    store.record(_recorded(run, 2, PATCH_42))
-    fake = SequencedFakeOpenAI([PATCH_42])
+    store.record(_recorded(run, 2, CREATE_42))
+    fake = SequencedFakeOpenAI([CREATE_42])
     client = MeteredClient(store=store, prices=PRICES, client=fake, run_id=run)
 
     r = run_loop(_ticket(VALIDATE_IS_42), repo, client, "fake",
@@ -245,8 +387,8 @@ def test_resume_continues_from_the_next_attempt(repo):
     fail, and continues from the next attempt, not from 1."""
     store = InMemoryCallStore()
     run = "run-resume-continue"
-    store.record(_recorded(run, 1, PATCH_7))
-    fake = SequencedFakeOpenAI([PATCH_42])
+    store.record(_recorded(run, 1, CREATE_7))
+    fake = SequencedFakeOpenAI([FIX_7_TO_42])
     client = MeteredClient(store=store, prices=PRICES, client=fake, run_id=run)
 
     r = run_loop(_ticket(VALIDATE_IS_42), repo, client, "fake",
@@ -258,7 +400,7 @@ def test_resume_continues_from_the_next_attempt(repo):
 
 def test_resume_with_no_history_starts_fresh(repo):
     store = InMemoryCallStore()
-    fake = SequencedFakeOpenAI([PATCH_42])
+    fake = SequencedFakeOpenAI([CREATE_42])
     client = MeteredClient(store=store, prices=PRICES, client=fake, run_id="never-ran")
 
     r = run_loop(_ticket(VALIDATE_IS_42), repo, client, "fake",
@@ -272,8 +414,8 @@ def test_resume_with_budget_already_spent_is_exhausted(repo):
     finds no budget left, and stops without a new call."""
     store = InMemoryCallStore()
     run = "run-resume-spent"
-    store.record(_recorded(run, 3, PATCH_7))
-    fake = SequencedFakeOpenAI([PATCH_42])
+    store.record(_recorded(run, 3, CREATE_7))
+    fake = SequencedFakeOpenAI([CREATE_42])
     client = MeteredClient(store=store, prices=PRICES, client=fake, run_id=run)
 
     r = run_loop(_ticket(VALIDATE_IS_42), repo, client, "fake",
@@ -294,7 +436,7 @@ def test_a_run_is_one_trace_with_real_ids(repo):
     on trace ids.
     """
     configure_tracing()
-    client, _ = client_for([PATCH_7, PATCH_42])  # fail once, then pass: two calls
+    client, _ = client_for([CREATE_7, FIX_7_TO_42])  # fail once, then pass: two calls
     r = run_loop(_ticket(VALIDATE_IS_42), repo, client, "fake", max_attempts=3)
 
     assert r.verdict == "pass"
@@ -329,7 +471,7 @@ def test_gate_blocks_a_wrong_but_passing_patch_then_passes(repo):
     """The heart of Layer 6 Stage 2: tests pass on attempt 1 but the judge blocks,
     so the builder tries again, and the second patch clears the judge."""
     # build 7 -> tests pass -> judge blocks -> build 42 -> tests pass -> judge passes
-    client, fake = client_for([PATCH_7, JUDGE_BLOCK, PATCH_42, JUDGE_PASS])
+    client, fake = client_for([CREATE_7, JUDGE_BLOCK, FIX_7_TO_42, JUDGE_PASS])
     r = run_loop(_ticket(VALIDATE_EXISTS), repo, client, "fake",
                  max_attempts=3, gate=True)
     assert r.verdict == "pass"
@@ -341,7 +483,7 @@ def test_gate_blocks_a_wrong_but_passing_patch_then_passes(repo):
 
 def test_gate_off_never_judges(repo):
     """Default behaviour is unchanged: no gate, no judge calls, no judges recorded."""
-    client, fake = client_for([PATCH_7])  # 7 is 'wrong' but the gate is off
+    client, fake = client_for([CREATE_7])  # 7 is 'wrong' but the gate is off
     r = run_loop(_ticket(VALIDATE_EXISTS), repo, client, "fake", max_attempts=3)
     assert r.verdict == "pass"
     assert r.judges == ()
@@ -350,7 +492,7 @@ def test_gate_off_never_judges(repo):
 
 def test_gate_exhausts_when_the_judge_keeps_blocking(repo):
     """A judge that never clears is bounded by max_attempts, not an infinite loop."""
-    client, fake = client_for([PATCH_7, JUDGE_BLOCK, PATCH_42, JUDGE_BLOCK])
+    client, fake = client_for([CREATE_7, JUDGE_BLOCK, FIX_7_TO_42, JUDGE_BLOCK])
     r = run_loop(_ticket(VALIDATE_EXISTS), repo, client, "fake",
                  max_attempts=2, gate=True)
     assert r.verdict == "exhausted"
@@ -362,7 +504,7 @@ def test_gate_exhausts_when_the_judge_keeps_blocking(repo):
 def test_gate_fails_open_when_the_judge_reply_is_unusable(repo):
     """A broken judge must not block otherwise-passing work: it passes, with a note,
     and records no verdict."""
-    client, fake = client_for([PATCH_42, JUDGE_PROSE])
+    client, fake = client_for([CREATE_42, JUDGE_PROSE])
     r = run_loop(_ticket(VALIDATE_EXISTS), repo, client, "fake",
                  max_attempts=3, gate=True)
     assert r.verdict == "pass"
@@ -377,7 +519,7 @@ def test_gate_is_unguarded_and_free_when_no_semantic_criteria(repo):
         'python -c "import sys; sys.exit(0 if open(\'answer.txt\').read().strip() '
         "== '42' else 1)\""
     )
-    client, fake = client_for([PATCH_42])  # no judge reply needed; none is requested
+    client, fake = client_for([CREATE_42])  # no judge reply needed; none is requested
     r = run_loop(_ticket(VALIDATE_EXISTS, check=check), repo, client, "fake",
                  max_attempts=3, gate=True)
     assert r.verdict == "pass"

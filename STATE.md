@@ -28,6 +28,7 @@ judge.py       the eval gate: grade check-less acceptance criteria, three-state
 loop.py (gate) --gate makes the judge a second gate in the loop, blocks rebuild
 evals.py       the dataset that grades the judge. Labelled cases in, matrix out
 evalstore.py   the accuracy port: record what the judge said vs what was labelled
+characterise.py the L4 sensor: run the suite before and after, diff the behaviour
 run.py         CLI. --max-attempts loops, --review, --fix, --judge, --gate
 preflight.py   four checks before you trust any number
 ```
@@ -70,13 +71,17 @@ have. Was not the fix it was sold as.
 
 ## Next, in order
 
-**0. Proven on a real third-party codebase. (Done, 23 July 2026, and it failed
-informatively.)** `mahmoud/boltons`, real open issue #301, one attempt on
-`gpt-5.4-mini`. agentpipe refused the patch; applying it by hand showed 445/445
-tests green, the bug still unfixed, and the BSD licence silently edited. See
-"the whole-file rule" under Known gaps. This is the first evidence about how the
-pipeline behaves on code it did not grow up with, and the answer is: the patch
-format is the weak point, not the context builder.
+**0. Proven on a real third-party codebase. (Run twice, 23 and 27 July 2026, and
+it failed informatively both times.)** `mahmoud/boltons`, real open issue #301,
+one attempt on `gpt-5.4-mini`. The first run refused the patch; applying it by
+hand showed 445/445 tests green, the bug still unfixed, and the BSD licence
+silently edited. The patch format was rebuilt around search/replace and the
+second run cost 5.8x less, left the licence structurally untouchable, and was
+refused again for the same missing `--- end` terminator, which has since been
+removed for edit blocks. See "the whole-file rule" and the run after it under
+Known gaps. The pipeline still has not *completed* a run against code it did not
+grow up with: the format now accepts what the model sends, but the one patch it
+has produced there passed the tests without fixing the bug.
 
 **1. Proven end-to-end on real work. (Done, 18 July 2026.)**
 The pipeline ran a real ticket start to finish on `gpt-5.4-mini`: TASK-TRUNCATE,
@@ -294,7 +299,9 @@ and the span hardcodes `gen_ai.system = "openai"`, which would be a lie.
 Both of the Layer 0 gaps recorded in PLAN.md are now closed.
 
 **The ratio metric hides the cost of a whole-file rewrite, and on real files the
-bill is dominated by output. (Open. Arithmetic, not yet observed.)**
+bill is dominated by output. (The whole-file half is closed, 27 July 2026; the
+metric half stands. The arithmetic below was done before any spend and the two
+real runs then bracketed it.)**
 
 `pack.RULES` asks the model for "the complete new contents of each file you
 change". So output tokens scale with **file size, not change size**, and output is
@@ -313,6 +320,12 @@ Now put that beside the number this project was founded on:
 |---|---|---|
 | Andrew's 70,000 in / 100 out | 700, reads as terrible | ~$0.053 |
 | the one-line urlutils fix | 1.0, reads as ideal | **$0.078** |
+| boltons #301, whole-file (measured) | 1.1, reads as ideal | **$0.046948** |
+| boltons #301, search/replace (measured) | 68.5, reads as terrible | **$0.008044** |
+
+The last two rows are the same ticket, the same file and the same model, a
+fortnight apart. The ratio moved 62x in the direction that reads as failure while
+the bill fell 5.8x. This is no longer an argument, it is a measurement.
 
 **The healthy-looking ratio costs more.** `ratio` measures shape, not money. A low
 ratio can mean "a small focused change" or "the model regurgitated a 1,600 line
@@ -395,6 +408,342 @@ now been seen live.
 What saved the working tree was `parse_edits` refusing a reply with no terminator,
 which is the right outcome reached for an unrelated reason. Strictness paid off
 by luck.
+
+**The format was changed, and the second run measured it. (27 July 2026.)**
+
+Same repository, same file, same model, same one-attempt shape, with
+search/replace edits instead of whole-file rewrites. The ticket is now committed
+(`tickets/TASK-BOLTONS-301.md`) so the input is reproducible; the old one was
+never captured, so the comparison is close but not byte-identical. boltons at
+`e66cade`, bug re-verified to still reproduce before spending anything.
+
+```
+23 July  whole-file      in 9,677   out 8,820   $0.046948   reply 39,267 chars
+27 July  search/replace  in 9,862   out   144   $0.008044   reply    572 chars
+```
+
+**5.8x cheaper, on 61x fewer output tokens.** Output fell from 85% of the bill to
+8% of it. Note the input went *up* by 185 tokens: `RULES` had to grow to describe
+the format. That is the fixed price of the change, paid on every call forever, and
+it is repaid by the first ~4 output tokens saved.
+
+Four findings, and only the first was predicted.
+
+**1. The licence is safe, and structurally so.** The reply quotes four lines of one
+method. The licence header is not in it, so no reply of this shape can alter the
+licence, whatever the model intends. Applied by hand, the diff is one hunk, seven
+insertions, two deletions, on a 38,692 character file. Compare 23 July, where the
+same request rewrote the file and quietly deleted `ARE DISCLAIMED` from the
+warranty clause. This was the claim the branch existed to make and it is the one
+thing that came out as designed.
+
+**2. Exact matching works on code the model did not write.** The open worry was
+that a model quoting text back would paraphrase it. It did not: the SEARCH block
+matched `boltons/funcutils.py` character for character, including indentation, on
+the first try, in a 1,062 line third-party file. One observation, not a rate.
+
+**3. It was refused again, for the same reason as last time, and that is no longer
+luck.** `finish_reason='stop'`, one well-formed SEARCH/REPLACE pair, and no
+`--- end`. Two runs against a real repository, two omissions of the same
+seven-character sentinel. The 39,000-character explanation ("after that much text
+the model forgot") is dead: this reply was 572 characters.
+
+The first draft of this paragraph said models drop redundant sentinels. **The
+table was then asked, and it says otherwise.** Across all 118 recorded replies,
+`--- end` is the same terminator the judge and reviewer use, and it is missing
+from exactly five:
+
+```
+content in the block   replies   missing '--- end'
+JSON  (judge/reviewer)     108          0
+code  (builder/fixer)       10          5
+```
+
+Same sentinel, same models: `gpt-5.4-nano` missed it 3 of 3 times as a fixer and
+wrote it correctly 20 of 20 times as a judge. So it is not model capability, and
+it is not reply length either (the five misses run from 116 to 39,267 characters).
+What the failures share is that **the block carries code**. JSON ends with a
+bracket the model has to close anyway; code just stops, and boltons files even end
+with their own `# end funcutils.py`. The honest claim is therefore narrow: a
+terminator after a block of code is unreliable, at 5 of 10, while the identical
+terminator after a block of JSON has never once been missed.
+
+The census also says the fixer has been quietly losing nano's work to this the
+whole time: TASK-FIX-DEMO, TASK-FIX-MINI and TASK-S3-NANO were all recorded as
+`unfixable` with correct code in the reply. That was written up as nano being bad
+at formats, and it fed the Stage 3 conclusion that routing trades cost against
+format reliability. It was this. The `fixer_reliability` view's nano 0% fix rate
+is measuring the terminator, not the model, and any routing decision taken from
+that row needs re-reading.
+
+**Closed the same day, by deleting the requirement rather than tuning it.** An
+edit block now ends at the next `--- path` header or at the end of the reply.
+`--- end` is still required for a NEW block, where content is arbitrary and
+nothing else could mark the end, and unchanged for the judge and reviewer, where
+it has never once failed. Both shapes parse, so nothing recorded is invalidated.
+
+Three things about the shape of the fix, since it is the parser that guards the
+working tree:
+
+- **Parser only. `pack.RULES` still asks for `--- end`.** The prompt is the front
+  of every pack, so editing it moves the cacheable prefix and makes every recorded
+  reply unreplayable. The mismatch costs a handful of tokens per call. What would
+  settle removing it: a measured cache saving big enough to justify reprinting the
+  prefix once.
+- **Scanning is line-oriented and pair-aware, not a regex.** Once a block can end
+  at the next header, the parser has to decide whether `--- something.py` inside a
+  REPLACE body is structure or code being inserted. A regex cannot know; the
+  scanner tracks whether it is inside a pair and treats everything there as
+  content. `test_a_header_line_inside_replacement_code_is_content_not_structure`
+  closes that hole before it could bite, since it was created by this change.
+- **Nothing else got friendlier.** Text between pairs, or after the last REPLACE,
+  is now refused with its own message. The terminator went because it was
+  redundant, not because refusing was wrong: a reply that half-followed the format
+  must never be applied as though it fully did.
+
+Verified on the thing itself rather than on a test double: the real 572 character
+reply, read back out of `model_calls` with nothing added, now parses, resolves and
+applies, and the licence diff is still one hunk with zero header lines touched.
+
+The error message is also wrong in a way worth fixing: a reply with correct
+markers and no terminator is reported as "the model replied with prose instead of
+following the format", because `_BLOCK` matches nothing and the prose branch is
+the fallback. It followed the format almost exactly. Misdiagnosis in an error
+message is how a five-minute fix becomes an afternoon.
+
+**4. Tests are not evidence, reproduced exactly, with the new format.** Applied by
+hand: `pytest -q tests/test_funcutils.py` green, 8 of 8. The acceptance check exits
+1. `f(20)` is still `None`. The model's patch stuffs `inspect.getsource(f)` into
+`ret['body']`, which is the whole function source and not its body, and it fixes
+nothing. Checked against the loop's own functions rather than by assertion:
+`run_checks` passes, `_acceptance_disagreement` fires, and `loop.py` would return
+**verdict PASS** with the disagreement attached as a warning. The patch format was
+never the reason that gap exists, and closing it is item B.
+
+**A fifth, found by accident, and it is a measurement bug not a code bug.** The
+first attempt to read the loop's verdict reported validation *failing*. It was not
+failing: `pytest` is not on `cmd.exe`'s PATH from a non-activated shell, so the
+command exited 1, and exit 1 means "work not done" rather than "broken", exactly
+the Windows seam documented in `checks.py` and listed above as caught-in-CI-only.
+It has now been hit locally, in a real run, and it read as a clean negative result.
+The only reason it was caught is that the output was read instead of the exit code.
+Anything running this ticket needs `.venv\Scripts` on PATH. The ticket keeps
+`pytest -q ...` rather than the more portable `python -m pytest` so that it still
+reproduces the recorded pack hash `2993be238f02cd7c`.
+
+**The trial on real repositories, and the case that is worse than boltons.
+(27 July 2026. See `plans/real-world-trial.md` for the rules, which were fixed
+before any repository was screened.)**
+
+Three third-party cases now, one attempt each, `gpt-5.4-mini`, $0.020410 in total.
+Scored on a ladder rather than pass/fail, because boltons would otherwise have
+reported "80% success" on a patch that did not fix the bug.
+
+| case | parse | apply | tests | **bug fixed** | nothing else touched |
+|---|---|---|---|---|---|
+| boltons #301 | yes | yes | yes | **no** | yes |
+| toolz #626 | yes | yes | yes | **yes** | yes |
+| funcy #108 | yes | yes | yes | **no** | **no** |
+
+**funcy #108 is the worst result this project has produced, and the most useful.**
+The patch passes all 205 tests, leaves `rcurry(str.endswith)` raising the same
+`ValueError` it was asked to fix, and quietly breaks something unrelated. It
+replaced "the name of `__init__`'s first parameter" with `__init__.__name__`,
+which is the string `'__init__'`, so `self` is no longer stripped from a class's
+argument spec:
+
+```
+original : names={'a', 'b'},         req_names={'a'}
+patched  : names={'a', 'self', 'b'}, req_names={'a', 'self'}
+```
+
+Nothing in funcy's suite covers that. boltons was green tests over work not done.
+This is green tests over work not done **plus a silent regression**, and the only
+thing that caught it was a human reading the diff.
+
+**That is the L4 rung having no automated check behind it.** Validation cannot see
+it (the tests pass), the acceptance check cannot see it (it asks about the bug,
+not about everything else), and the judge reads code rather than running it, which
+is exactly the blind spot Stage 3d diagnosed.
+
+**Closed the same day: `characterise.py`, opt-in via `--characterise`.** Run the
+ticket's validation suite twice, before the patch and after, recording what the
+touched modules were called with and what they returned, then diff. A difference
+the ticket did not ask for is the finding.
+
+The design is small because of one free measurement taken before writing anything.
+The plan had been to generate inputs, or to record calls and replay them against
+the patched code. Instrumenting funcy's suite showed it **already** calls
+`get_spec` 32 times, 6 of them with a class, including the exact call whose answer
+the patch changed. The inputs did not need inventing; they were already being
+supplied by the suite that then reported success. So there is no generation, no
+replay, no pickling: record the same suite twice and compare.
+
+Proven on the real repository rather than on a fixture: 164 calls recorded either
+side of agentpipe's own funcy patch, exactly one difference reported, no noise.
+
+Two limits, stated rather than discovered later. It sees only what the suite
+already exercises, so it is a floor and not a proof. And it cannot tell a wanted
+change from an unwanted one, because the ticket asked for *some* behaviour to
+change; deciding which difference is the point is still a human's job.
+
+**Its own first live run gave a false all-clear, which is the lesson in
+miniature.** The ticket's validation is a bare `pytest -q`, which does not put the
+repository on `sys.path` where `python -m pytest` does, so the plugin's import of
+`funcy._inspect` failed, the failure was swallowed by a `continue`, and the report
+read `no behaviour changed across 0 recorded calls`. A sensor announcing all-clear
+while switched off is worse than no sensor. The plugin now puts the rootdir on
+`sys.path` itself, records which modules it failed to watch, and `record()` raises
+rather than returning an empty snapshot in both the nothing-watched and
+nothing-recorded cases. `PYTHONHASHSEED` is pinned for the same family of reason:
+set reprs otherwise order differently between processes and manufacture
+differences that are not real.
+
+**Where the pipeline actually breaks, now that there is more than one datapoint.**
+L0 and L1 held in all three cases, including a two-file reply, the first this
+project has ever received, parsed by a scanner written that morning for a case
+nobody had seen. Format and matching are no longer the weak point. **L3 is, and L3
+is the model rather than the machine.** In all three cases agentpipe did its job
+and the patch was wrong.
+
+**A caveat on the one success.** toolz #626 is public, has an open pull request
+against it, and the fix is two lines. A model that saw the repository, the issue
+or the PR in training produces that without reasoning. This is the solution
+leakage problem SWE-bench is criticised for, it applies here, and nothing in this
+trial controls for it.
+
+**The loop reported PASSED over work that was not done. (Closed, 27 July 2026.
+The sensor was never missing. The wire was.)**
+
+Finding 4 of the boltons run said the loop would call a non-fix a PASS. Three real
+third-party runs then made it a rate rather than a worry: **all three had green
+test suites, two had not done the work, and the loop called all three PASSED.**
+
+What makes this one worth writing down is not the bug, it is where the bug was.
+`_acceptance_disagreement` ran the ticket's own acceptance check on every passing
+run. On boltons and funcy it ran, it failed, and the loop printed it next to the
+word PASSED as a warning. **The detection worked. Nothing acted on it.** Wiring a
+smoke detector to a printer is not a missing sensor, and it is a different repair
+from the one "we cannot see this failure" implies.
+
+Closed by making the checks decide. Validation asks "is the repo healthy"; the
+ticket's acceptance check asks "is THIS work present". Only the second is the
+question the loop was asked, and a suite the ticket's author did not write cannot
+answer it. So on a green validation the checks now get the last word, through the
+three-state contract `checks.py` already had:
+
+- checks pass, or the ticket has none -> `pass`, unchanged
+- checks fail -> `_decide_fail`, exactly like a failing test, retrying with the
+  criteria as feedback and reporting `exhausted` rather than `pass` when the
+  budget runs out
+- a check that cannot run -> `blocked`, because a broken instrument is not
+  unfinished work and rebuilding cannot repair it
+- the resume path got the same treatment, or it would have been the one door left
+  into the hole
+
+**The feedback carries the criterion's text and never the check command.** Checks
+are deliberately absent from the pack, and a model handed the command it is scored
+by can satisfy that one command instead of the ticket, which is
+green-tests-over-real-work rebuilt inside the gate meant to stop it. Pinned by
+test.
+
+**Scored against the three real runs before it was written, then verified with the
+real `run_loop` afterwards, for $0 billed** (attempt 1 rebuilds a byte-identical
+pack, so every call replayed; `max_attempts=1` means the retry never has budget to
+spend):
+
+| | boltons | toolz | funcy | correct |
+|---|---|---|---|---|
+| before | PASSED | PASSED | PASSED | 1 of 3 |
+| after | exhausted | pass | exhausted | **3 of 3** |
+
+No false blocks: toolz, the one run that was genuinely right, still passes.
+
+**What this does not close, stated plainly.** Gate 1 asks only "was the job done".
+It cannot see "the job was done and something else broke". That case did not occur
+in three runs, and funcy's regression was caught only because it arrived alongside
+a gate-1 failure. The characterisation sensor sees it and deliberately does not
+gate on it: it cannot tell a regression from the change the ticket asked for. On
+the toolz ticket the intended fix moves `tail(0, [10,20,30])` from `(10,20,30)` to
+`()`, and a brake on "behaviour changed" would have blocked a correct patch. It
+did not fire there only because the old suite never called `tail` with zero, which
+is why the bug survived in the first place. File-level filtering does not rescue
+it either: funcy's regression sat inside a file the ticket authorised.
+
+So the sensor reports and does not stop, and what would promote it is written down
+rather than left to a later mood: **the fraction of flagged differences that turn
+out to be the change the ticket asked for.** Low, and the brake is safe. Not low,
+and it needs to know intent first, which is a larger piece of work than a brake.
+No figure is set here because setting one now would be inventing it.
+
+Cyril's proposal for that larger piece, recorded because it is the strongest idea
+anyone has had about the judge: do not brake on a difference, **verify it**. Gate 2
+produces a fact (`get_spec` answered `{'x','y'}`, now answers `{'x','y','self'}`),
+the ticket states the intent, and deciding whether the ticket asked for that change
+is a reading question. That matters because the judge's one known blind spot is
+that it cannot tell what code does at runtime, and here the sensor has already run
+the code. **It hands the judge a measured fact instead of asking it to imagine
+one**, which is the "let the judge run code rather than reason about it" argument
+arriving from a direction nobody was looking.
+
+**The gate has now fired on a real run. (27 July 2026, funcy #108 re-run.)**
+
+The acceptance gate was verified offline against three recorded runs for $0, which
+proved the arithmetic and not the wiring. Case 5 ran it for real: the same funcy
+ticket, `--max-attempts 3`, on a case whose L3 failure was already measured rather
+than merely predicted. That distinction is the finding from case 4, where a case
+chosen *because* it looked hard was solved on the first attempt and the gate had
+nothing to block.
+
+```
+attempt 1: implement        in=3,679 out=441 cache=0%   replayed, free
+attempt 2: validation_retry in=3,767 out=457 cache=0%   $0.004882
+attempt 3: validation_retry in=3,906 out=301 cache=0%   $0.004284
+GAVE UP (hit the attempt limit)
+REASON: some acceptance checks report work remaining
+```
+
+**The first time this loop has refused to call a green test suite a success.** All
+five pre-registered predictions held, including the two that cost something to
+admit:
+
+- **The retry does not rescue it.** Two further attempts, neither fixed the bug.
+  Being told a criterion is unmet is not the same as being told why, and the
+  feedback deliberately withholds the check command.
+- **The regression rides through every attempt.** Attempt 1 introduced the
+  `get_spec` `self` leak; attempts 2 and 3 rebuilt from a repo that already
+  contained it, were told nothing about it, and preserved it. The run ended with
+  the reported bug unfixed *and* the regression in the tree, and the loop's only
+  complaint was about the first. That is the measured price of gate 2 reporting
+  rather than gating, and it was predicted in advance rather than excused after.
+- **Cache stayed at 0%**, as predicted, but funcy's pack is too small for that to
+  settle anything. Only a large-pack repository can separate "attempt 1 broke the
+  prefix" from "the pack was never above the threshold".
+
+**A probe that lied, caught by reading its output.** The first regression check
+used a class with no `__init__`, so `get_spec` had nothing to inspect and returned
+an empty set before *and* after. It reported no regression for a reason unrelated
+to the patch. The number alone would have closed a live finding.
+
+**report_loop counted replayed calls as spend. (Closed, same day, and it is the
+sixth bug's twin.)**
+
+The funcy run reported `$0.013910`. `$0.009166` was billed. Attempt 1 replayed
+from the run that first paid for it, and `cost_usd` on a replayed record carries
+the original price.
+
+`evals.py` already separated billed from full price, after this exact bug hit the
+eval harness on its first `--repeat 5` on 23 July. **The fix was applied where the
+bug was found rather than everywhere it lived**, so the loop went on overstating
+for four more days, and nobody noticed because nobody had reason to add up a
+loop's attempts by hand.
+
+That is the transferable lesson and it is more general than the original: **a bug
+of this shape is a family, and the first sighting is rarely the only member.**
+When one is found, the question is not only "where is the fix" but "what else
+shares this shape". `LoopResult` now has `billed_cost_usd` and `replayed`
+alongside `total_cost_usd`, the report shows both whenever they differ, and
+`test_a_replayed_attempt_is_not_counted_as_spend` names the run.
 
 **The test suite used to leave background git daemons behind. (Closed, and it
 took a machine down first.)**
@@ -600,3 +949,16 @@ The money was the small half. The real half is that a replayed sample is not an
 independent draw, so counting replays toward stability would have reported perfect
 consistency for a judge that was asked once. Fixed by separating billed from full
 price; pinned by `test_a_replayed_sample_is_not_counted_as_spend`.
+
+**A seventh, and it is the family's purest specimen (27 July 2026).** The loop
+reported PASSED on two of three real third-party runs where the work was not done.
+Every other entry above is a system that could not see the failure. This one
+**saw it, measured it correctly, printed it, and passed anyway**, because the
+acceptance check's result was attached to the verdict as a warning instead of
+being allowed to change it.
+
+That is worth separating from the rest, because it implies a different search.
+The other six say "add a sensor". This one says **go and look at what the sensors
+you already have are wired to.** A detection whose only consumer is a human
+reading terminal output is a detection the system does not have. Closed under
+"the loop reported PASSED over work that was not done" above.
