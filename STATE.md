@@ -70,13 +70,16 @@ have. Was not the fix it was sold as.
 
 ## Next, in order
 
-**0. Proven on a real third-party codebase. (Done, 23 July 2026, and it failed
-informatively.)** `mahmoud/boltons`, real open issue #301, one attempt on
-`gpt-5.4-mini`. agentpipe refused the patch; applying it by hand showed 445/445
-tests green, the bug still unfixed, and the BSD licence silently edited. See
-"the whole-file rule" under Known gaps. This is the first evidence about how the
-pipeline behaves on code it did not grow up with, and the answer is: the patch
-format is the weak point, not the context builder.
+**0. Proven on a real third-party codebase. (Run twice, 23 and 27 July 2026, and
+it failed informatively both times.)** `mahmoud/boltons`, real open issue #301,
+one attempt on `gpt-5.4-mini`. The first run refused the patch; applying it by
+hand showed 445/445 tests green, the bug still unfixed, and the BSD licence
+silently edited. The patch format was rebuilt around search/replace and the
+second run cost 5.8x less, left the licence structurally untouchable, and was
+refused again for the same missing `--- end` terminator. See "the whole-file
+rule" and the run after it under Known gaps. The pipeline still has not completed
+a run against code it did not grow up with, and the remaining blocker is one
+seven-character sentinel, not the context builder.
 
 **1. Proven end-to-end on real work. (Done, 18 July 2026.)**
 The pipeline ran a real ticket start to finish on `gpt-5.4-mini`: TASK-TRUNCATE,
@@ -294,7 +297,9 @@ and the span hardcodes `gen_ai.system = "openai"`, which would be a lie.
 Both of the Layer 0 gaps recorded in PLAN.md are now closed.
 
 **The ratio metric hides the cost of a whole-file rewrite, and on real files the
-bill is dominated by output. (Open. Arithmetic, not yet observed.)**
+bill is dominated by output. (The whole-file half is closed, 27 July 2026; the
+metric half stands. The arithmetic below was done before any spend and the two
+real runs then bracketed it.)**
 
 `pack.RULES` asks the model for "the complete new contents of each file you
 change". So output tokens scale with **file size, not change size**, and output is
@@ -313,6 +318,12 @@ Now put that beside the number this project was founded on:
 |---|---|---|
 | Andrew's 70,000 in / 100 out | 700, reads as terrible | ~$0.053 |
 | the one-line urlutils fix | 1.0, reads as ideal | **$0.078** |
+| boltons #301, whole-file (measured) | 1.1, reads as ideal | **$0.046948** |
+| boltons #301, search/replace (measured) | 68.5, reads as terrible | **$0.008044** |
+
+The last two rows are the same ticket, the same file and the same model, a
+fortnight apart. The ratio moved 62x in the direction that reads as failure while
+the bill fell 5.8x. This is no longer an argument, it is a measurement.
 
 **The healthy-looking ratio costs more.** `ratio` measures shape, not money. A low
 ratio can mean "a small focused change" or "the model regurgitated a 1,600 line
@@ -395,6 +406,74 @@ now been seen live.
 What saved the working tree was `parse_edits` refusing a reply with no terminator,
 which is the right outcome reached for an unrelated reason. Strictness paid off
 by luck.
+
+**The format was changed, and the second run measured it. (27 July 2026.)**
+
+Same repository, same file, same model, same one-attempt shape, with
+search/replace edits instead of whole-file rewrites. The ticket is now committed
+(`tickets/TASK-BOLTONS-301.md`) so the input is reproducible; the old one was
+never captured, so the comparison is close but not byte-identical. boltons at
+`e66cade`, bug re-verified to still reproduce before spending anything.
+
+```
+23 July  whole-file      in 9,677   out 8,820   $0.046948   reply 39,267 chars
+27 July  search/replace  in 9,862   out   144   $0.008044   reply    572 chars
+```
+
+**5.8x cheaper, on 61x fewer output tokens.** Output fell from 85% of the bill to
+8% of it. Note the input went *up* by 185 tokens: `RULES` had to grow to describe
+the format. That is the fixed price of the change, paid on every call forever, and
+it is repaid by the first ~4 output tokens saved.
+
+Four findings, and only the first was predicted.
+
+**1. The licence is safe, and structurally so.** The reply quotes four lines of one
+method. The licence header is not in it, so no reply of this shape can alter the
+licence, whatever the model intends. Applied by hand, the diff is one hunk, seven
+insertions, two deletions, on a 38,692 character file. Compare 23 July, where the
+same request rewrote the file and quietly deleted `ARE DISCLAIMED` from the
+warranty clause. This was the claim the branch existed to make and it is the one
+thing that came out as designed.
+
+**2. Exact matching works on code the model did not write.** The open worry was
+that a model quoting text back would paraphrase it. It did not: the SEARCH block
+matched `boltons/funcutils.py` character for character, including indentation, on
+the first try, in a 1,062 line third-party file. One observation, not a rate.
+
+**3. It was refused again, for the same reason as last time, and that is no longer
+luck.** `finish_reason='stop'`, one well-formed SEARCH/REPLACE pair, and no
+`--- end`. Two runs against a real repository, two omissions of the same
+seven-character sentinel. The 39,000-character explanation ("after that much text
+the model forgot") is dead: this reply was 572 characters. `--- end` is redundant
+information in a format that already has `>>>>>>> REPLACE` as an unambiguous
+terminator, and models drop redundant sentinels. Open, and it is now the single
+thing standing between this pipeline and a working run on real code.
+
+The error message is also wrong in a way worth fixing: a reply with correct
+markers and no terminator is reported as "the model replied with prose instead of
+following the format", because `_BLOCK` matches nothing and the prose branch is
+the fallback. It followed the format almost exactly. Misdiagnosis in an error
+message is how a five-minute fix becomes an afternoon.
+
+**4. Tests are not evidence, reproduced exactly, with the new format.** Applied by
+hand: `pytest -q tests/test_funcutils.py` green, 8 of 8. The acceptance check exits
+1. `f(20)` is still `None`. The model's patch stuffs `inspect.getsource(f)` into
+`ret['body']`, which is the whole function source and not its body, and it fixes
+nothing. Checked against the loop's own functions rather than by assertion:
+`run_checks` passes, `_acceptance_disagreement` fires, and `loop.py` would return
+**verdict PASS** with the disagreement attached as a warning. The patch format was
+never the reason that gap exists, and closing it is item B.
+
+**A fifth, found by accident, and it is a measurement bug not a code bug.** The
+first attempt to read the loop's verdict reported validation *failing*. It was not
+failing: `pytest` is not on `cmd.exe`'s PATH from a non-activated shell, so the
+command exited 1, and exit 1 means "work not done" rather than "broken", exactly
+the Windows seam documented in `checks.py` and listed above as caught-in-CI-only.
+It has now been hit locally, in a real run, and it read as a clean negative result.
+The only reason it was caught is that the output was read instead of the exit code.
+Anything running this ticket needs `.venv\Scripts` on PATH. The ticket keeps
+`pytest -q ...` rather than the more portable `python -m pytest` so that it still
+reproduces the recorded pack hash `2993be238f02cd7c`.
 
 **The test suite used to leave background git daemons behind. (Closed, and it
 took a machine down first.)**
