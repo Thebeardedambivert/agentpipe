@@ -99,6 +99,25 @@ selecting for the answer it wants.
 | `Suor/funcy` | qualifies. #162/#160/#145/#123 are features or docs, so the first bug candidate is #108, and it reproduces |
 | `more-itertools/more-itertools` | **dropped.** All seven open issues are feature requests. There was no bug to take |
 | `pyparsing/pyparsing` | qualifies on the rules. Held back on cost, see below |
+| `SethMMorton/natsort` | **dropped.** Four open issues, all features or documentation |
+| `astanin/python-tabulate` | qualifies. Taken as case 4, **out of order, deliberately.** See below |
+
+**The selection rule was deviated from for case 4, on purpose, and the deviation
+is recorded rather than absorbed.** The rule takes issues newest first with no
+skipping, because whoever picks will otherwise pick tractable ones without meaning
+to. tabulate #434 (29 June 2026, a tuple where a list was expected) is newer than
+#428 (12 May 2026) and qualifies. #428 was taken anyway.
+
+The reason: the acceptance gate had just been wired, and the question that needed
+answering was whether it fires on a real run and whether the retry it triggers
+recovers. A case that passes on attempt 1 cannot answer either. So the case was
+chosen *because* it looked likely to fail.
+
+That is the same bias the rule guards against, pointed the other way, and it has
+the same consequence: **case 4 measures a case chosen to be hard, so its result
+does not belong in the same count as cases 1 to 3.** It is evidence about the gate,
+not evidence about the pipeline's hit rate. #434 remains unscreened and is the
+next case if the rule is followed.
 
 Three things that went wrong in the screening itself, kept because they are the
 part that would otherwise be quietly tidied away:
@@ -214,6 +233,82 @@ weak is the right word.
 **Cost.** Three real third-party runs for $0.020410 in total. Cost is not what
 limits this trial; the limit is how many issues can be screened and scored by
 hand.
+
+## Case 4: tabulate #428, pre-registered
+
+Written before the run, after the acceptance gate landed. This is the first case
+run with a gate that can stop the loop, so the predictions are about the gate as
+much as about the patch.
+
+**The bug.** `disable_numparse=True` is ignored when `maxcolwidths` is also set, so
+a cell like `'80,443'` is parsed as a number and raises `ValueError`. Verified to
+reproduce on today's HEAD (`268615a`). It is a regression: fixed once in PR #362,
+reintroduced by a later merge. The ticket states the symptom only. The issue text
+contains the diagnosis, and copying it in would have made this a typing exercise,
+which rule 4 of the selection rule already forbids.
+
+**Cost, measured first.** `tabulate/__init__.py` is 107 KB in one file, so the pack
+is ~26,040 tokens and an attempt costs about $0.021. Three attempts is about $0.07
+at worst. The same run under the old whole-file format would have been $0.059 for
+one attempt.
+
+**Prediction 1: reaches L2, fails L3.** The defect is not visible in the line that
+holds it. `_type(cell, numparse)` is well formed; it is wrong only because `_type`'s
+second positional parameter is `has_invisible`. Seeing that requires holding the
+call site and the signature in view together, which is precisely the class that beat
+this model on boltons and funcy. **Named failure, so this is falsifiable:** the most
+likely wrong fix is wrapping the conversion in `try/except`, which makes the crash
+go away while leaving `disable_numparse` still ignored, and which passes validation
+because no existing test covers the combination.
+
+**Prediction 2: the gate fires, for the first time in a live run.** If prediction 1
+holds, the acceptance check fails on a green test suite, and `_acceptance` sends it
+back to the builder. Every previous run either passed on attempt 1 or was scored
+after the fact. This is the retry cycle being watched rather than tested.
+
+**Prediction 3: attempt 2 is a coin flip.** The feedback names the criterion and
+deliberately withholds the check command, so the model learns *that* the option is
+still ignored and not *where*. Whether that is enough signal is the open question
+the withholding decision has never been tested on.
+
+**Prediction 4: cache stays at 0%, on every attempt.** This one contradicts the
+optimistic reading of Layer 1 and is the most useful prediction here if it holds.
+The pack is far above the ~1,024 token threshold, so the discount should apply. It
+will not, because attempt 1 **edits the only selected file**, so from the `files`
+block onward attempt 2's pack differs and the cacheable prefix collapses to
+`rules + tree`, roughly 400 tokens, back under the threshold. If this is wrong and
+the cache does fire, the pack-ordering argument needs revisiting.
+
+The general form of prediction 4, since it is larger than this case: **two of the
+project's own principles pull against each other, and nothing has noticed because
+no pack has ever been big enough for it to matter.** Rebuild-never-accumulate says
+attempt 2 reads the repo as it is now. Stable-content-first says the front of the
+pack must stay byte-identical. Reading the repo as it is now is exactly what makes
+it not identical, for the one file that carries almost all the tokens. Reordering
+cannot fix it, because the file is simultaneously the largest cacheable block and
+the block that changes.
+
+Where the cache does still pay, so this is not read as "caching is worthless":
+
+| situation | pays? |
+|---|---|
+| retry after the model edited the selected file | no |
+| retry after a reply that failed to parse, so nothing was written | yes, in full |
+| several files selected and only the last is edited | partly, and file order decides how much |
+| a different ticket against the same repo | `rules + tree` only |
+
+Worth noting that boltons' two runs were both refusals, which is the second row:
+the case where the cache would have paid is the case where the model produced
+nothing usable.
+
+The measured 92% hit in STATE.md was a controlled probe, identical prefix and
+different suffix. That establishes the provider's cache works. It does not
+establish that a real loop can reach it, and this prediction is the first test of
+whether it can.
+
+**Prediction 5: L4 holds.** tabulate has 180 output tests over exactly this code
+path, so unlike funcy a regression here is likely to be caught by validation before
+the characterisation sensor sees it.
 
 ## What would falsify the current design
 
