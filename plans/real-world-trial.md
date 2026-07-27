@@ -162,6 +162,59 @@ right conclusion is that the issues were too easy, not that the pipeline is good
 That is the same discipline the judge's eval dataset was held to, and it is stated
 here so it cannot be renegotiated afterwards.
 
+## Results, 27 July 2026
+
+Two cases run, one attempt each, `gpt-5.4-mini`, `--apply`. pyparsing held back on
+cost. Counts, not rates: this is three cases including boltons.
+
+| case | L0 parse | L1 apply | L2 tests | L3 bug fixed | L4 nothing else | cost |
+|---|---|---|---|---|---|---|
+| boltons #301 | yes | yes | yes | **no** | yes | $0.008044 |
+| toolz #626 | yes | yes | yes | **yes** | yes | $0.007622 |
+| funcy #108 | yes | yes | yes | **no** | **no** | $0.004744 |
+
+**Both predictions were right, which is worth less than it looks.** toolz reached
+L3 as predicted, funcy failed at L3 as predicted. Two predictions is not a track
+record, and the funcy one was easy to make: "introspecting built-in method
+descriptors is harder than it looks" is not a bold call.
+
+**The finding is funcy, and it is worse than boltons.** The patch passes all 205
+tests, does not fix the reported bug (`rcurry(str.endswith)` raises the identical
+`ValueError`), and **quietly breaks something else**. It rewrote
+
+    self_set = {func.__init__.__code__.co_varnames[0]}
+
+as a `getattr(func.__init__, '__name__', None)`, which is the string `'__init__'`,
+not the name of the first parameter. So `self` stops being stripped from a class's
+argument spec:
+
+    original : names={'a', 'b'},         req_names={'a'}
+    patched  : names={'a', 'self', 'b'}, req_names={'a', 'self'}
+
+Nothing in funcy's suite covers it. boltons was green tests over work not done;
+this is green tests over work not done **plus** a silent regression, and the only
+thing that caught it was a human reading the diff. That is the L4 rung having no
+automated check behind it, stated in the ladder and now demonstrated.
+
+**What the three cases say about where the pipeline breaks.** L0 and L1 held every
+time, including a two-file reply, which is the first this project has ever
+received and which the terminator fix was written for without having seen one.
+Format and matching are no longer the weak point. **L3 is**, and L3 is the model,
+not the machine: in all three cases agentpipe did its job and the patch was wrong.
+
+**A caveat on toolz, recorded rather than celebrated.** The issue is from a
+public tracker, has an open pull request against it (#629), and the fix is two
+lines. A model that has seen the repository, the issue or the PR in training would
+produce this without reasoning at all. That is the solution-leakage problem
+SWE-bench has been repeatedly criticised for, it applies here, and nothing in this
+trial controls for it. The funcy case is weak evidence against leakage mattering
+much (that issue is public and open since 2021, and the model still failed), but
+weak is the right word.
+
+**Cost.** Three real third-party runs for $0.020410 in total. Cost is not what
+limits this trial; the limit is how many issues can be screened and scored by
+hand.
+
 ## What would falsify the current design
 
 Stated now, so it cannot be softened later:

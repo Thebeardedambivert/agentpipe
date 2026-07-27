@@ -530,6 +530,57 @@ Anything running this ticket needs `.venv\Scripts` on PATH. The ticket keeps
 `pytest -q ...` rather than the more portable `python -m pytest` so that it still
 reproduces the recorded pack hash `2993be238f02cd7c`.
 
+**The trial on real repositories, and the case that is worse than boltons.
+(27 July 2026. See `plans/real-world-trial.md` for the rules, which were fixed
+before any repository was screened.)**
+
+Three third-party cases now, one attempt each, `gpt-5.4-mini`, $0.020410 in total.
+Scored on a ladder rather than pass/fail, because boltons would otherwise have
+reported "80% success" on a patch that did not fix the bug.
+
+| case | parse | apply | tests | **bug fixed** | nothing else touched |
+|---|---|---|---|---|---|
+| boltons #301 | yes | yes | yes | **no** | yes |
+| toolz #626 | yes | yes | yes | **yes** | yes |
+| funcy #108 | yes | yes | yes | **no** | **no** |
+
+**funcy #108 is the worst result this project has produced, and the most useful.**
+The patch passes all 205 tests, leaves `rcurry(str.endswith)` raising the same
+`ValueError` it was asked to fix, and quietly breaks something unrelated. It
+replaced "the name of `__init__`'s first parameter" with `__init__.__name__`,
+which is the string `'__init__'`, so `self` is no longer stripped from a class's
+argument spec:
+
+```
+original : names={'a', 'b'},         req_names={'a'}
+patched  : names={'a', 'self', 'b'}, req_names={'a', 'self'}
+```
+
+Nothing in funcy's suite covers that. boltons was green tests over work not done.
+This is green tests over work not done **plus a silent regression**, and the only
+thing that caught it was a human reading the diff.
+
+**That is the L4 rung having no automated check behind it.** Validation cannot see
+it (the tests pass), the acceptance check cannot see it (it asks about the bug,
+not about everything else), and the judge reads code rather than running it, which
+is exactly the blind spot Stage 3d diagnosed. The cheapest thing that would have
+caught it is a characterisation check: snapshot the touched module's behaviour
+before, compare after, and report a difference nobody asked for. It needs no
+foresight about what to test, which is precisely why it works here.
+
+**Where the pipeline actually breaks, now that there is more than one datapoint.**
+L0 and L1 held in all three cases, including a two-file reply, the first this
+project has ever received, parsed by a scanner written that morning for a case
+nobody had seen. Format and matching are no longer the weak point. **L3 is, and L3
+is the model rather than the machine.** In all three cases agentpipe did its job
+and the patch was wrong.
+
+**A caveat on the one success.** toolz #626 is public, has an open pull request
+against it, and the fix is two lines. A model that saw the repository, the issue
+or the PR in training produces that without reasoning. This is the solution
+leakage problem SWE-bench is criticised for, it applies here, and nothing in this
+trial controls for it.
+
 **The test suite used to leave background git daemons behind. (Closed, and it
 took a machine down first.)**
 
