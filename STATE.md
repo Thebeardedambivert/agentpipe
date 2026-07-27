@@ -1,8 +1,77 @@
 # STATE
 
-Where this actually is, as of 23 July 2026. Read after CLAUDE.md and PLAN.md.
+Where this actually is, as of 27 July 2026. Read after CLAUDE.md and PLAN.md.
 
 CLAUDE.md is the rules. PLAN.md is the design. This is the situation.
+
+## Start here if you are picking this up cold
+
+**Branches, and the only thing that is untidy.** Everything is committed, pushed
+and CI green. Nothing is in flight.
+
+```
+main ──8──> layer6-evals ──11──> patch-search-replace   (HEAD, 19 ahead of main)
+```
+
+`patch-search-replace` is a descendant of `layer6-evals`, so merging it alone
+would bring both. Two PRs were preferred anyway, evals first, so the eval dataset
+and the patch-format rewrite land as separate stories rather than one bundled
+merge commit. PR bodies were drafted; **check whether they were actually opened
+and merged before assuming the backlog is still there.**
+
+**What changed most recently, and it is the thing to know.** The loop used to
+report PASSED whenever the test suite went green. On three real third-party runs
+that was wrong twice. `_acceptance` in `loop.py` now lets the ticket's own
+acceptance checks decide, and the run of 27 July was the first time this loop has
+ever refused to call a green suite a success.
+
+**The live question nobody has answered.** L3, "is the reported bug actually
+fixed", is where this pipeline fails. Not the format, not the matching, not the
+context builder. Three of five real runs ended green over work that was not done.
+That is the founding thesis reproduced on other people's code, and it is now
+measured rather than argued about.
+
+**What is deliberately unbuilt:** Layer 4 (replay) and Layer 7 (Temporal). Gate 2
+(`characterise.py`) reports and does not gate, on purpose, for the reason under
+"the loop reported PASSED" below. Do not wire it into a brake without reading why.
+
+## What is actually next, with the reasoning attached
+
+Nothing here is urgent and nothing here is decided. Ordered by what the evidence
+argues for, not by size.
+
+**1. Verify a reported difference instead of braking on it. (Cyril's idea, and the
+strongest one anyone has had about the judge.)** Gate 2 cannot tell a regression
+from the change the ticket asked for, which is why it does not gate. But it
+produces a *fact*: `get_spec` answered `{'x','y'}`, now answers `{'x','y','self'}`.
+The ticket states the intent. Deciding whether the ticket asked for that change is
+a reading question, and the judge is good at reading. It is bad at knowing what
+code does at runtime, and here the sensor has already run the code. **This hands
+the judge a measured fact instead of asking it to imagine one**, which is the
+"let the judge run code rather than reason about it" argument arriving from a
+direction nobody was looking. Only fires when a difference exists, so it is cheap.
+
+**2. Merge the backlog** if the two PRs were never opened. See Start here.
+
+**3. The input side, which is now the whole bill.** search/replace fixed output.
+On tabulate a run was 92% input: 27,043 tokens to change one line. The measured
+baseline CLAUDE.md required before touching context trimming now exists, so that
+conversation is unblocked. Read the cache note first: the discount cannot help a
+retry that edits its own context, because rebuild-never-accumulate and
+stable-content-first pull against each other. Prediction 4 in the trial doc has
+the argument and it is still unmeasured on a large pack.
+
+**4. Two screens that were never built**, both cheap and both aimed at real risk:
+replay all 118+ stored replies through the old and new parser and diff them, and
+put Hypothesis on `patch.py` (for any file and any quoted region, applying an edit
+must change only that region). The second states the licence guarantee as a
+property rather than as one test with one file.
+
+**5. Harvest a real case into the eval dataset.** Still the gap STATE.md calls the
+one that matters, and five real runs have now gone past without one being captured.
+
+**Do not** start by tuning the judge's prompt. Stage 3c measured that and it is a
+recorded negative.
 
 ## Built
 
@@ -79,9 +148,30 @@ silently edited. The patch format was rebuilt around search/replace and the
 second run cost 5.8x less, left the licence structurally untouchable, and was
 refused again for the same missing `--- end` terminator, which has since been
 removed for edit blocks. See "the whole-file rule" and the run after it under
-Known gaps. The pipeline still has not *completed* a run against code it did not
-grow up with: the format now accepts what the model sends, but the one patch it
-has produced there passed the tests without fixing the bug.
+Known gaps.
+
+**Superseded by the trial: five real runs now exist, and two of them completed.**
+`plans/real-world-trial.md` has the rules, the pre-registered predictions and the
+scored results. The short version, as counts and never a rate:
+
+| case | parse | apply | tests | **bug fixed** | nothing else broke |
+|---|---|---|---|---|---|
+| boltons #301 | yes | yes | yes | **no** | yes |
+| toolz #626 | yes | yes | yes | **yes** | yes |
+| funcy #108 | yes | yes | yes | **no** | **no** |
+| tabulate #428 | yes | yes | n/a | **yes** | yes |
+| funcy #108 rerun | yes | yes | yes | **no** | **no** |
+
+Format and matching held every time, including a 107 KB file and the first
+multi-file reply this project has ever received. **L3 is where it breaks, and L3
+is the model rather than the machine.** Two caveats that must travel with those
+counts: toolz has a public open PR against it, so training-set leakage is an
+untested alternative explanation for that success; and tabulate was chosen out of
+order, deliberately, because it looked likely to fail, so it does not belong in
+the same tally as the rest. Both are recorded in the trial doc.
+
+Total spend for all five runs, plus every verification and replay: under $0.06.
+**Cost is not what limits this work. Hand-screening and hand-scoring is.**
 
 **1. Proven end-to-end on real work. (Done, 18 July 2026.)**
 The pipeline ran a real ticket start to finish on `gpt-5.4-mini`: TASK-TRUNCATE,
