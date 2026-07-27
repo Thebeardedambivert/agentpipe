@@ -8,7 +8,7 @@ be used together at all.
 
 ## Validation
 ```
-pytest -q test/test_output.py
+python -m pytest -q test/test_output.py
 ```
 
 ## Acceptance

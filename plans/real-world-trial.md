@@ -310,6 +310,69 @@ whether it can.
 path, so unlike funcy a regression here is likely to be caught by validation before
 the characterisation sensor sees it.
 
+## Case 4 result: the prediction was wrong, and the run broke on the ticket
+
+`gpt-5.4-mini`, `--max-attempts 3`, `--apply`. One attempt made, $0.022015 spent.
+
+| rung | outcome |
+|---|---|
+| L0 parse | yes |
+| L1 apply, SEARCH exact | yes, against a 107 KB file |
+| L2 validation | **could not run**, and the fault was the ticket's, see below |
+| L3 bug fixed | **yes**, verified by the acceptance check and by 323 passing tests |
+| L4 nothing else changed | yes, 0 differences across 188 recorded calls |
+
+**Prediction 1 was wrong.** The model fixed it on the first attempt, and not with
+the failure that was named in advance. It did not wrap the conversion in
+`try/except`; it short-circuited the call instead:
+
+```python
+- if cell == "" or _isnumber(cell)
++ if cell == "" or not numparse or _isnumber(cell)
+```
+
+That is a different fix from the maintainer's diagnosis, which was to correct the
+positional argument, and it is nonetheless correct. When parsing is switched off
+the value never reaches `_type` at all, so the mismatched argument stops mattering.
+When parsing is on, `_type(cell, True)` happens to agree with the intended
+defaults, which is why the bug only ever appeared in the disabled case.
+
+**What that says, and it is not flattering to the picker.** This case was chosen
+out of order specifically because it looked likely to fail, on the reasoning that
+the defect is invisible in the line that holds it, the same shape that beat this
+model on boltons and funcy. That reasoning produced the wrong answer. **The ability
+to predict which cases are hard is itself unvalidated**, now 2 right and 1 wrong,
+and the deliberate deviation from the selection rule bought nothing: an ordinary
+newest-first pick would have served as well. The rule was right and the exception
+was not.
+
+**The gate did not fire, because there was nothing to block.** So the question the
+case was chosen to answer is still open, and the reliable way to answer it is a
+case already known to fail rather than one predicted to.
+
+**Prediction 4 is untested.** No second attempt happened, so the cache claim about
+retries stands unmeasured. It stays on the record as written.
+
+**The run stopped for a reason that was nobody's fault but the ticket author's.**
+Validation was written as `pytest -q test/test_output.py`. The baseline that
+declared it green was run as `python -m pytest`. Those differ in exactly one way
+that matters: `python -m pytest` puts the working directory on `sys.path` and bare
+`pytest` does not, so `import tabulate` failed and pytest exited 2. **The baseline
+was verified with a different instrument from the one that shipped**, which is
+`InMemoryCallStore` versus `PostgresCallStore` in a smaller costume, committed by
+someone who had read that lesson the same afternoon.
+
+Two things follow, and the second is the useful one:
+
+- The cost was $0.022, because the fix changes the ticket text, which changes the
+  pack, so attempt 1 will not replay free. A broken validation command is not paid
+  for at the moment it is written but at the moment it is run, after the model call.
+- **The three-state contract earned its keep, visibly.** Exit 2 routed to `blocked`
+  and the loop stopped after one attempt. Had a broken runner been read as a
+  failing test, the loop would have retried twice more against a problem no model
+  could fix, at roughly $0.022 each. The design note in `checks.py` said this
+  would happen; this is the first time it has been watched happening.
+
 ## What would falsify the current design
 
 Stated now, so it cannot be softened later:
