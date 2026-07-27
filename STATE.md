@@ -686,6 +686,65 @@ the code. **It hands the judge a measured fact instead of asking it to imagine
 one**, which is the "let the judge run code rather than reason about it" argument
 arriving from a direction nobody was looking.
 
+**The gate has now fired on a real run. (27 July 2026, funcy #108 re-run.)**
+
+The acceptance gate was verified offline against three recorded runs for $0, which
+proved the arithmetic and not the wiring. Case 5 ran it for real: the same funcy
+ticket, `--max-attempts 3`, on a case whose L3 failure was already measured rather
+than merely predicted. That distinction is the finding from case 4, where a case
+chosen *because* it looked hard was solved on the first attempt and the gate had
+nothing to block.
+
+```
+attempt 1: implement        in=3,679 out=441 cache=0%   replayed, free
+attempt 2: validation_retry in=3,767 out=457 cache=0%   $0.004882
+attempt 3: validation_retry in=3,906 out=301 cache=0%   $0.004284
+GAVE UP (hit the attempt limit)
+REASON: some acceptance checks report work remaining
+```
+
+**The first time this loop has refused to call a green test suite a success.** All
+five pre-registered predictions held, including the two that cost something to
+admit:
+
+- **The retry does not rescue it.** Two further attempts, neither fixed the bug.
+  Being told a criterion is unmet is not the same as being told why, and the
+  feedback deliberately withholds the check command.
+- **The regression rides through every attempt.** Attempt 1 introduced the
+  `get_spec` `self` leak; attempts 2 and 3 rebuilt from a repo that already
+  contained it, were told nothing about it, and preserved it. The run ended with
+  the reported bug unfixed *and* the regression in the tree, and the loop's only
+  complaint was about the first. That is the measured price of gate 2 reporting
+  rather than gating, and it was predicted in advance rather than excused after.
+- **Cache stayed at 0%**, as predicted, but funcy's pack is too small for that to
+  settle anything. Only a large-pack repository can separate "attempt 1 broke the
+  prefix" from "the pack was never above the threshold".
+
+**A probe that lied, caught by reading its output.** The first regression check
+used a class with no `__init__`, so `get_spec` had nothing to inspect and returned
+an empty set before *and* after. It reported no regression for a reason unrelated
+to the patch. The number alone would have closed a live finding.
+
+**report_loop counted replayed calls as spend. (Closed, same day, and it is the
+sixth bug's twin.)**
+
+The funcy run reported `$0.013910`. `$0.009166` was billed. Attempt 1 replayed
+from the run that first paid for it, and `cost_usd` on a replayed record carries
+the original price.
+
+`evals.py` already separated billed from full price, after this exact bug hit the
+eval harness on its first `--repeat 5` on 23 July. **The fix was applied where the
+bug was found rather than everywhere it lived**, so the loop went on overstating
+for four more days, and nobody noticed because nobody had reason to add up a
+loop's attempts by hand.
+
+That is the transferable lesson and it is more general than the original: **a bug
+of this shape is a family, and the first sighting is rarely the only member.**
+When one is found, the question is not only "where is the fix" but "what else
+shares this shape". `LoopResult` now has `billed_cost_usd` and `replayed`
+alongside `total_cost_usd`, the report shows both whenever they differ, and
+`test_a_replayed_attempt_is_not_counted_as_spend` names the run.
+
 **The test suite used to leave background git daemons behind. (Closed, and it
 took a machine down first.)**
 

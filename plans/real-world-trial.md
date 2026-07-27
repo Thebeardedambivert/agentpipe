@@ -420,6 +420,64 @@ expected to survive into every subsequent attempt, and if the run ends `exhauste
 it will still be sitting in the working tree. That is the cost of report-only,
 predicted in advance rather than excused afterwards.
 
+## Case 5 result: the gate fired, and all five predictions held
+
+`gpt-5.4-mini`, `--max-attempts 3`, `--apply`. Three attempts, run ended
+`exhausted`. **The first time the loop has ever refused to call a passing test
+suite a success.**
+
+```
+attempt 1: implement        in=3,679 out=441 cache=0%  replayed, free
+attempt 2: validation_retry in=3,767 out=457 cache=0%  $0.004882
+attempt 3: validation_retry in=3,906 out=301 cache=0%  $0.004284
+verdict: GAVE UP (hit the attempt limit)
+REASON: some acceptance checks report work remaining
+```
+
+| prediction | outcome |
+|---|---|
+| 1. the gate fires and the run continues | **held.** Three attempts, `exhausted`, not `pass` |
+| 2. attempt 2 does not fix it either | **held.** Acceptance still failing after all three |
+| 3. cache stays at 0% | **held**, with the caveat below |
+| 4. criterion travels, check command does not | **held.** Verified by rebuilding attempt 2's pack |
+| 5. the regression survives every attempt | **held.** `['a','b']` to `['a','b','self']`, and it stays |
+
+**Prediction 4, checked properly rather than assumed.** Attempt 2's pack was
+rebuilt from the recorded attempt 1 reply and searched. The criterion text is
+present; the check command is absent. That is the withholding decision surviving
+contact with a real pack, not just a unit test.
+
+**Prediction 3 is confirmed but proves less than it looks**, which was stated in
+advance and is repeated here so the record cannot drift. funcy's pack is ~3,700
+tokens, under the ~1,024 threshold only in the sense that its *cacheable prefix*
+would be, so a 0% reading cannot separate "attempt 1 edited the selected files and
+broke the prefix" from "this pack was never big enough". Only a large-pack
+repository settles it, and tabulate was the one that could have, had its run
+reached a second attempt.
+
+**Prediction 5 is the price of gate 2 reporting rather than gating, paid in
+public.** Attempt 1 introduced the `get_spec` regression. Attempts 2 and 3 rebuilt
+from a repository that already contained it, were told nothing about it, and
+carried it forward. The run ended with the reported bug unfixed **and** `self`
+leaking into every class's argument spec, and the loop's only complaint was about
+the first of those. That is exactly the gap the report-only decision leaves open,
+and it is now measured rather than argued about.
+
+**A probe that lied, caught by reading the output.** The first version of the
+prediction-5 check used a class with no `__init__` of its own, so `get_spec` had no
+parameters to inspect and returned an empty set both before and after. It reported
+"no regression" for a reason with nothing to do with the patch. Reading the number
+alone would have recorded a false all-clear and closed a real finding.
+
+**And a bug in the report, found by scoring the run rather than reading it.**
+`report_loop` printed `cost $0.013910`. Only `$0.009166` was billed: attempt 1
+replayed from the run that first paid for it, and a replayed record carries the
+original price. This is the same bug STATE.md records as the sixth, fixed in the
+eval harness and pinned by `test_a_replayed_sample_is_not_counted_as_spend`, still
+present in the loop. **The fix was applied where the bug was found rather than
+everywhere it lived**, which is its own lesson and a more general one than the
+original.
+
 ## What would falsify the current design
 
 Stated now, so it cannot be softened later:

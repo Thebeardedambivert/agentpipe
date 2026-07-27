@@ -17,12 +17,13 @@ import json
 import subprocess
 import uuid
 from decimal import Decimal
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from agentpipe.judge import JudgeVerdict
-from agentpipe.loop import run_loop
+from agentpipe.loop import report_loop, run_loop
 from agentpipe.repo import Repo
 from agentpipe.telemetry import (
     CallRecord,
@@ -300,6 +301,57 @@ def test_a_ticket_with_no_acceptance_checks_still_passes_on_green_tests(repo):
     assert r.verdict == "pass"
     assert r.attempts == 1
     assert fake.calls == 1
+
+
+def test_a_replayed_attempt_is_not_counted_as_spend(repo):
+    """funcy #108 retry, 27 July 2026. report_loop said $0.013910, $0.009166 was
+    billed.
+
+    Attempt 1 rebuilt a byte-identical pack, so the seam answered it from the
+    store. That is a real attempt whose answer came from a previous run, and
+    `cost_usd` on the replayed record carries the price that run paid. Summing it
+    again reports money nobody spent.
+
+    `evals.py` separated billed from full price after the identical bug hit the
+    eval harness on its first --repeat 5. The fix went in where the bug was found
+    and not everywhere it lived, so the loop went on overstating for another four
+    days. That is the part worth remembering: a bug of this shape is a family, and
+    the first sighting is rarely the only member.
+
+    Overstating is the friendlier direction. It is still a number that looked
+    right, was computed correctly, and answered a different question than the one
+    being asked.
+    """
+    store = InMemoryCallStore()
+    run = "run-replay-cost"
+    # A prior run already paid for this exact pack. Reconstructing the key the way
+    # the seam does is the point: this must be a genuine replay, not a stub.
+    fake = SequencedFakeOpenAI([CREATE_42])
+    first = MeteredClient(store=store, prices=PRICES, client=fake, run_id=run)
+    paid = run_loop(_ticket(VALIDATE_IS_42), repo, first, "fake", max_attempts=1)
+    assert paid.replayed == 0
+    assert paid.billed_cost_usd == paid.total_cost_usd  # nothing replayed yet
+    assert paid.billed_cost_usd > 0
+
+    # Same ticket, same repo state, a different run: the pack hash matches, so the
+    # seam replays and the model is never called again. answer.txt is untracked,
+    # so `git checkout` will not remove it and the NEW block would rightly refuse
+    # to overwrite a file that now exists. Put the tree back as it started.
+    Path(repo.root, "answer.txt").unlink(missing_ok=True)
+    second_fake = SequencedFakeOpenAI([CREATE_42])
+    second = MeteredClient(store=store, prices=PRICES, client=second_fake,
+                           run_id="run-replay-cost-2")
+    again = run_loop(_ticket(VALIDATE_IS_42), repo, second, "fake", max_attempts=1)
+
+    assert second_fake.calls == 0            # genuinely replayed, not re-called
+    assert again.replayed == 1
+    assert again.total_cost_usd > 0          # full price still reported
+    assert again.billed_cost_usd == 0        # and nothing was billed for it
+
+    # The report must not present the full price as the bill.
+    text = report_loop(again)
+    assert "$0 billed" in text
+    assert "replayed free" in text
 
 
 # --- resume: continuing a crashed run -------------------------------------

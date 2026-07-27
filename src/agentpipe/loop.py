@@ -124,12 +124,53 @@ class LoopResult:
 
     @property
     def total_cost_usd(self) -> Decimal:
-        # Include the judge's calls: with gating on they are a real part of the
-        # run's bill, and hiding them would be the quiet-cost trap this project
-        # exists to refuse.
+        """What this run's calls are worth at full price.
+
+        Include the judge's calls: with gating on they are a real part of the
+        run's bill, and hiding them would be the quiet-cost trap this project
+        exists to refuse.
+
+        Not the same as what was billed. See `billed_cost_usd`.
+        """
         build = sum((r.cost_usd for r in self.results), Decimal(0))
         judge = sum((j.cost_usd for j in self.judges), Decimal(0))
         return build + judge
+
+    @property
+    def billed_cost_usd(self) -> Decimal:
+        """What this run actually cost, with replayed calls excluded.
+
+        A replayed call is a real attempt whose answer came from the store
+        instead of the model, and `cost_usd` on that record carries the price the
+        original run paid. Summing it again reports money nobody spent.
+
+        Found on the funcy retry run of 27 July 2026, which reported $0.013910
+        and billed $0.009166: attempt 1 replayed from the run that first paid for
+        it. `evals.py` already separated these two after the same bug bit the eval
+        harness on its first `--repeat 5`. **The fix went in where the bug was
+        found rather than everywhere it lived**, and the loop kept overstating for
+        another four days. That is the transferable part of this comment.
+        """
+        build = sum(
+            (r.cost_usd for r in self.results if r.record.status != "replayed"),
+            Decimal(0),
+        )
+        judge = sum(
+            (j.cost_usd for j in self.judges
+             if j.record is not None and j.record.status != "replayed"),
+            Decimal(0),
+        )
+        return build + judge
+
+    @property
+    def replayed(self) -> int:
+        """Attempts answered from the store rather than the model.
+
+        Worth surfacing rather than merely subtracting: a replayed attempt is not
+        an independent draw. A loop whose every attempt replayed did not try
+        three times, it tried once and re-read the answer twice.
+        """
+        return sum(1 for r in self.results if r.record.status == "replayed")
 
 
 def _build_node(state: LoopState) -> dict[str, Any]:
@@ -520,14 +561,26 @@ def report_loop(result: LoopResult) -> str:
     lines = [
         f"loop       {headline}",
         f"attempts   {result.attempts}",
-        f"cost       ${result.total_cost_usd}",
     ]
+    # Show what was billed, and show full price beside it only when they differ.
+    # One number here would be a lie in whichever direction it was chosen.
+    if result.replayed:
+        lines.append(
+            f"cost       ${result.billed_cost_usd} billed "
+            f"(${result.total_cost_usd} at full price; "
+            f"{result.replayed} attempt(s) replayed free)"
+        )
+    else:
+        lines.append(f"cost       ${result.billed_cost_usd}")
+
     for i, r in enumerate(result.results, start=1):
         u = r.record.usage
+        replayed = r.record.status == "replayed"
         lines.append(
             f"  attempt {i}: {r.record.attempt_kind:<16} "
             f"in={u.input_tokens:,} out={u.output_tokens:,} "
             f"cache={u.cache_hit_rate:.0%} ${r.cost_usd}"
+            + ("   replayed, not billed" if replayed else "")
         )
 
     # Only when validation is actually what failed. A run stopped by the acceptance
