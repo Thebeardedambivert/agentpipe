@@ -612,6 +612,80 @@ or the PR in training produces that without reasoning. This is the solution
 leakage problem SWE-bench is criticised for, it applies here, and nothing in this
 trial controls for it.
 
+**The loop reported PASSED over work that was not done. (Closed, 27 July 2026.
+The sensor was never missing. The wire was.)**
+
+Finding 4 of the boltons run said the loop would call a non-fix a PASS. Three real
+third-party runs then made it a rate rather than a worry: **all three had green
+test suites, two had not done the work, and the loop called all three PASSED.**
+
+What makes this one worth writing down is not the bug, it is where the bug was.
+`_acceptance_disagreement` ran the ticket's own acceptance check on every passing
+run. On boltons and funcy it ran, it failed, and the loop printed it next to the
+word PASSED as a warning. **The detection worked. Nothing acted on it.** Wiring a
+smoke detector to a printer is not a missing sensor, and it is a different repair
+from the one "we cannot see this failure" implies.
+
+Closed by making the checks decide. Validation asks "is the repo healthy"; the
+ticket's acceptance check asks "is THIS work present". Only the second is the
+question the loop was asked, and a suite the ticket's author did not write cannot
+answer it. So on a green validation the checks now get the last word, through the
+three-state contract `checks.py` already had:
+
+- checks pass, or the ticket has none -> `pass`, unchanged
+- checks fail -> `_decide_fail`, exactly like a failing test, retrying with the
+  criteria as feedback and reporting `exhausted` rather than `pass` when the
+  budget runs out
+- a check that cannot run -> `blocked`, because a broken instrument is not
+  unfinished work and rebuilding cannot repair it
+- the resume path got the same treatment, or it would have been the one door left
+  into the hole
+
+**The feedback carries the criterion's text and never the check command.** Checks
+are deliberately absent from the pack, and a model handed the command it is scored
+by can satisfy that one command instead of the ticket, which is
+green-tests-over-real-work rebuilt inside the gate meant to stop it. Pinned by
+test.
+
+**Scored against the three real runs before it was written, then verified with the
+real `run_loop` afterwards, for $0 billed** (attempt 1 rebuilds a byte-identical
+pack, so every call replayed; `max_attempts=1` means the retry never has budget to
+spend):
+
+| | boltons | toolz | funcy | correct |
+|---|---|---|---|---|
+| before | PASSED | PASSED | PASSED | 1 of 3 |
+| after | exhausted | pass | exhausted | **3 of 3** |
+
+No false blocks: toolz, the one run that was genuinely right, still passes.
+
+**What this does not close, stated plainly.** Gate 1 asks only "was the job done".
+It cannot see "the job was done and something else broke". That case did not occur
+in three runs, and funcy's regression was caught only because it arrived alongside
+a gate-1 failure. The characterisation sensor sees it and deliberately does not
+gate on it: it cannot tell a regression from the change the ticket asked for. On
+the toolz ticket the intended fix moves `tail(0, [10,20,30])` from `(10,20,30)` to
+`()`, and a brake on "behaviour changed" would have blocked a correct patch. It
+did not fire there only because the old suite never called `tail` with zero, which
+is why the bug survived in the first place. File-level filtering does not rescue
+it either: funcy's regression sat inside a file the ticket authorised.
+
+So the sensor reports and does not stop, and what would promote it is written down
+rather than left to a later mood: **the fraction of flagged differences that turn
+out to be the change the ticket asked for.** Low, and the brake is safe. Not low,
+and it needs to know intent first, which is a larger piece of work than a brake.
+No figure is set here because setting one now would be inventing it.
+
+Cyril's proposal for that larger piece, recorded because it is the strongest idea
+anyone has had about the judge: do not brake on a difference, **verify it**. Gate 2
+produces a fact (`get_spec` answered `{'x','y'}`, now answers `{'x','y','self'}`),
+the ticket states the intent, and deciding whether the ticket asked for that change
+is a reading question. That matters because the judge's one known blind spot is
+that it cannot tell what code does at runtime, and here the sensor has already run
+the code. **It hands the judge a measured fact instead of asking it to imagine
+one**, which is the "let the judge run code rather than reason about it" argument
+arriving from a direction nobody was looking.
+
 **The test suite used to leave background git daemons behind. (Closed, and it
 took a machine down first.)**
 
@@ -816,3 +890,16 @@ The money was the small half. The real half is that a replayed sample is not an
 independent draw, so counting replays toward stability would have reported perfect
 consistency for a judge that was asked once. Fixed by separating billed from full
 price; pinned by `test_a_replayed_sample_is_not_counted_as_spend`.
+
+**A seventh, and it is the family's purest specimen (27 July 2026).** The loop
+reported PASSED on two of three real third-party runs where the work was not done.
+Every other entry above is a system that could not see the failure. This one
+**saw it, measured it correctly, printed it, and passed anyway**, because the
+acceptance check's result was attached to the verdict as a warning instead of
+being allowed to change it.
+
+That is worth separating from the rest, because it implies a different search.
+The other six say "add a sensor". This one says **go and look at what the sensors
+you already have are wired to.** A detection whose only consumer is a human
+reading terminal output is a detection the system does not have. Closed under
+"the loop reported PASSED over work that was not done" above.

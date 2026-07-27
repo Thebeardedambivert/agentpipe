@@ -60,6 +60,14 @@ FIX_7_TO_42 = (
 STILL_7 = (
     "--- answer.txt\n<<<<<<< SEARCH\n7\n=======\n7\n>>>>>>> REPLACE\n--- end"
 )
+# The same idea for the acceptance-gate tests, where validation is happy with any
+# content and only the ticket's own check disagrees.
+STILL_42 = (
+    "--- answer.txt\n<<<<<<< SEARCH\n42\n=======\n42\n>>>>>>> REPLACE\n--- end"
+)
+FIX_42_TO_999 = (
+    "--- answer.txt\n<<<<<<< SEARCH\n42\n=======\n999\n>>>>>>> REPLACE\n--- end"
+)
 PROSE = "Sure, I can help you with that!"
 
 
@@ -204,25 +212,94 @@ def test_pack_is_deterministic_across_rebuilds(repo):
     assert build(t, repo, selected).hash == build(t, repo, selected).hash
 
 
-def test_green_validation_but_failing_acceptance_warns(repo):
-    """Validation passing is not proof the ticket's work was done.
+# Validation that only proves the file exists, which is the shape of a real test
+# suite: it answers "is the repo healthy", never "was this ticket's work done".
+VALIDATE_EXISTS_ONLY = (
+    'python -c "import os, sys; sys.exit(0 if os.path.exists(\'answer.txt\') else 1)"'
+)
+# The ticket's own definition of done, which the patch below does not meet.
+CHECK_IS_999 = (
+    'python -c "import sys; sys.exit(0 if open(\'answer.txt\').read().strip() '
+    "== '999' else 1)\""
+)
 
-    Here validation only checks the file exists, but the acceptance check demands
-    content '999'. The patch writes '42': tests go green, acceptance does not, and
-    the loop passes while warning that the two disagree.
+
+def test_green_tests_over_unfinished_work_no_longer_report_passed(repo):
+    """boltons #301 and funcy #108, 27 July 2026. Named because it was paid for.
+
+    Three real runs against third-party repositories, one attempt each on
+    gpt-5.4-mini. All three ended with a green test suite. Two of the three had
+    not done the work: boltons' rebuilt function still returned None, funcy's
+    rcurry still raised. The loop reported PASSED for all three.
+
+    The acceptance check was not missing. It ran, it failed, and the loop printed
+    it beside the word PASSED as a warning. Nothing acted on it. The sensor was
+    wired to a printer.
+
+    Same shape here: validation only proves the file exists, the ticket demands
+    '999', the patch writes '42' forever. The loop must not call that a pass.
     """
-    validate_exists = (
-        'python -c "import os, sys; sys.exit(0 if os.path.exists(\'answer.txt\') else 1)"'
-    )
-    check_999 = (
-        'python -c "import sys; sys.exit(0 if open(\'answer.txt\').read().strip() == \'999\' else 1)"'
-    )
-    t = _ticket(validate_exists, check=check_999)
-    client, _ = client_for([CREATE_42])
+    t = _ticket(VALIDATE_EXISTS_ONLY, check=CHECK_IS_999)
+    client, fake = client_for([CREATE_42, STILL_42])
     r = run_loop(t, repo, client, "fake", max_attempts=2)
-    assert r.verdict == "pass"
+
+    assert r.verdict == "exhausted"          # not "pass", which is the whole point
+    assert r.attempts == 2                   # it retried rather than shrugging
+    assert fake.calls == 2
+    # And the run says why it stopped, in the ticket's words.
     assert r.acceptance_warning is not None
-    assert "acceptance" in r.acceptance_warning
+
+
+def test_a_failing_acceptance_check_feeds_back_the_criterion_not_the_command(repo):
+    """What the builder is told when acceptance fails, and what it is not told.
+
+    The criterion's text goes back; the check command never does. A model handed
+    the exact command it is scored by can satisfy that one command instead of the
+    ticket, which is green-tests-over-real-work rebuilt inside the gate meant to
+    stop it. Checks are absent from the pack for the same reason (pack.py sends
+    only each criterion's text), and this pins that they stay absent here too.
+    """
+    t = _ticket(VALIDATE_EXISTS_ONLY, check=CHECK_IS_999)
+    client, fake = client_for([CREATE_42, FIX_42_TO_999])
+    r = run_loop(t, repo, client, "fake", max_attempts=3)
+
+    assert r.verdict == "pass"               # the retry actually fixed it
+    assert r.attempts == 2
+    retry_pack = fake.messages[1][1]["content"]
+    assert "answer.txt has the right content" in retry_pack   # the criterion
+    # '999' appears only inside the check command, so its absence is proof the
+    # command did not travel with the criterion.
+    assert "999" not in retry_pack
+
+
+def test_a_broken_acceptance_check_stops_the_run_instead_of_retrying(repo):
+    """A check that cannot run is a broken ticket, not unfinished work.
+
+    Exit 2 from an acceptance check means the instrument is broken, and rebuilding
+    cannot fix an instrument. Same three-state contract validation already uses,
+    applied on the other side of the pass.
+    """
+    t = _ticket(VALIDATE_EXISTS_ONLY, check='python -c "import sys; sys.exit(2)"')
+    client, fake = client_for([CREATE_42])
+    r = run_loop(t, repo, client, "fake", max_attempts=3)
+
+    assert r.verdict == "blocked"
+    assert fake.calls == 1                   # the budget was not burned on it
+
+
+def test_a_ticket_with_no_acceptance_checks_still_passes_on_green_tests(repo):
+    """Unguarded is a third state, and it must not be read as "not done".
+
+    `assess` reports PROCEED for a ticket carrying no checks, so passing that
+    through unexamined would send every check-less ticket into a retry it can
+    never satisfy. This pins the distinction that keeps the gate from eating them.
+    """
+    client, fake = client_for([CREATE_42])
+    r = run_loop(_ticket(VALIDATE_IS_42), repo, client, "fake", max_attempts=3)
+
+    assert r.verdict == "pass"
+    assert r.attempts == 1
+    assert fake.calls == 1
 
 
 # --- resume: continuing a crashed run -------------------------------------
